@@ -134,6 +134,9 @@ static int nr_resolved_deltas;
 static int nr_threads;
 
 static int from_stdin;
+static int unsafe_object_hash;
+/* the_hash_algo, or its unsafe variant under indexPack.unsafeObjectHash */
+static const struct git_hash_algo *object_hash_algo;
 static int strict;
 static int do_fsck_object;
 static struct fsck_options fsck_options;
@@ -374,7 +377,7 @@ static const char *open_pack_file(const char *pack_name)
 		output_fd = -1;
 		nothread_data.pack_fd = input_fd;
 	}
-	git_hash_init(&input_ctx, the_hash_algo);
+	git_hash_init(&input_ctx, unsafe_hash_algo(the_hash_algo));
 	return pack_name;
 }
 
@@ -481,7 +484,7 @@ static void *unpack_entry_data(off_t offset, size_t size,
 
 	if (!is_delta_type(type)) {
 		hdrlen = format_object_header(hdr, sizeof(hdr), type, size);
-		git_hash_init(&c, the_hash_algo);
+		git_hash_init(&c, object_hash_algo);
 		git_hash_update(&c, hdr, hdrlen);
 	} else
 		oid = NULL;
@@ -1067,7 +1070,7 @@ static struct base_data *resolve_delta(struct object_entry *delta_obj,
 	free(delta_data);
 	if (!result_data)
 		bad_object(delta_obj->idx.offset, _("failed to apply delta"));
-	hash_object_file(the_hash_algo, result_data, result_size,
+	hash_object_file(object_hash_algo, result_data, result_size,
 			 delta_obj->real_type, &delta_obj->idx.oid);
 	sha1_object(result_data, NULL, result_size, delta_obj->real_type,
 		    &delta_obj->idx.oid);
@@ -1291,7 +1294,7 @@ static void parse_pack_objects(unsigned char *hash)
 
 	/* Check pack integrity */
 	flush();
-	git_hash_init(&tmp_ctx, the_hash_algo);
+	git_hash_init(&tmp_ctx, unsafe_hash_algo(the_hash_algo));
 	git_hash_clone(&tmp_ctx, &input_ctx);
 	git_hash_final(hash, &tmp_ctx);
 	if (!hasheq(fill(the_hash_algo->rawsz), hash, the_repository->hash_algo))
@@ -1690,6 +1693,10 @@ static int git_index_pack_config(const char *k, const char *v,
 		else
 			opts->flags &= ~WRITE_REV;
 	}
+	if (!strcmp(k, "indexpack.unsafeobjecthash")) {
+		unsafe_object_hash = git_config_bool(k, v);
+		return 0;
+	}
 	if (!strcmp(k, "core.deltabasecachelimit")) {
 		opts->delta_base_cache_limit = git_config_ulong(k, v, ctx->kvi);
 		return 0;
@@ -2039,6 +2046,10 @@ int cmd_index_pack(int argc,
 	 */
 	if (!the_repository->hash_algo)
 		repo_set_hash_algo(the_repository, GIT_HASH_DEFAULT);
+
+	object_hash_algo = the_hash_algo;
+	if (from_stdin && unsafe_object_hash)
+		object_hash_algo = unsafe_hash_algo(the_hash_algo);
 
 	opts.flags &= ~(WRITE_REV | WRITE_REV_VERIFY);
 	if (rev_index) {
