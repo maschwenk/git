@@ -594,6 +594,312 @@ test_expect_success 'rapid nested directory creation' '
 	git fsmonitor--daemon status
 '
 
+test_expect_success 'status sees changes in a directory moved into the worktree' '
+	test_when_finished "stop_daemon_delete_repo test_move_in" &&
+
+	git init test_move_in &&
+	git -C test_move_in config core.fsmonitor true &&
+	start_daemon -C test_move_in &&
+
+	mkdir outside &&
+	echo 1 >outside/file &&
+	mv outside test_move_in/moved-in &&
+	git -C test_move_in add moved-in &&
+	git -C test_move_in status --porcelain >actual &&
+	echo "A  moved-in/file" >expect &&
+	test_cmp expect actual &&
+
+	echo 22 >test_move_in/moved-in/file &&
+	git -C test_move_in status --porcelain >actual &&
+	echo "AM moved-in/file" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'status sees changes below a renamed directory' '
+	test_when_finished "stop_daemon_delete_repo test_rename_sub" &&
+
+	git init test_rename_sub &&
+	mkdir -p test_rename_sub/dir/sub &&
+	echo 1 >test_rename_sub/dir/sub/file &&
+	git -C test_rename_sub add dir &&
+	git -C test_rename_sub commit -q -m initial &&
+	git -C test_rename_sub config core.fsmonitor true &&
+	start_daemon -C test_rename_sub &&
+
+	mv test_rename_sub/dir test_rename_sub/renamed &&
+	git -C test_rename_sub add -A &&
+	git -C test_rename_sub commit -q -m renamed &&
+	git -C test_rename_sub status --porcelain >actual &&
+	test_must_be_empty actual &&
+
+	echo 22 >test_rename_sub/renamed/sub/file &&
+	git -C test_rename_sub status --porcelain >actual &&
+	echo " M renamed/sub/file" >expect &&
+	test_cmp expect actual
+'
+
+test_expect_success 'directories renamed through places the daemon does not watch' '
+	test_when_finished "stop_daemon_delete_repo test_unpaired; rm -rf moved-out" &&
+
+	git init test_unpaired &&
+	mkdir -p test_unpaired/pkg/node_modules/dep test_unpaired/dir \
+		test_unpaired/out &&
+	echo 1 >test_unpaired/pkg/node_modules/dep/file &&
+	echo 1 >test_unpaired/dir/file &&
+	echo 1 >test_unpaired/out/file &&
+	git -C test_unpaired add . &&
+	git -C test_unpaired commit -q -m initial &&
+	git -C test_unpaired config core.fsmonitor true &&
+	start_daemon -C test_unpaired --tf "$PWD/unpaired.trace" &&
+
+	# Move directories through "staging", which the daemon does not
+	# watch, like "pnpm install" does with staging directories created
+	# just before. The daemon sees only one half of each rename.
+	mkdir staging &&
+	mv test_unpaired/pkg/node_modules staging/ &&
+	rm -rf test_unpaired/pkg &&
+	mv test_unpaired/dir staging/renamed &&
+	mv staging test_unpaired/pkg &&
+	mv test_unpaired/out moved-out &&
+
+	# Give the daemon time to stop waiting for the other halves.
+	sleep 3 &&
+	git -C test_unpaired fsmonitor--daemon status &&
+
+	>test_unpaired/pkg/renamed/new &&
+	retry_grep "^event: pkg/renamed/new$" unpaired.trace &&
+
+	echo 22 >test_unpaired/pkg/node_modules/dep/file &&
+	git -C test_unpaired status --porcelain >actual &&
+	git -C test_unpaired -c core.fsmonitor=false status --porcelain >expect &&
+	test_cmp expect actual
+'
+
+test_lazy_prereq INOTIFY_WATCHES '
+	test "$(uname -s)" = Linux &&
+	test -r /proc/$$/fdinfo/0
+'
+
+stop_inotify_daemon () {
+	if test -n "$inotify_pid"
+	then
+		kill -CONT "$inotify_pid" 2>/dev/null || :
+		kill "$inotify_pid" 2>/dev/null || :
+		wait "$inotify_pid" 2>/dev/null || :
+		inotify_pid=
+	fi
+}
+
+start_inotify_daemon () {
+	local tries fdinfo &&
+	inotify_fdinfo= &&
+	{
+		GIT_TRACE_FSMONITOR="$PWD/inotify.trace" \
+			git -C "$1" fsmonitor--daemon run \
+			>inotify.out 2>inotify.err &
+	} &&
+	inotify_pid=$! &&
+	test_when_finished stop_inotify_daemon &&
+	test_atexit stop_inotify_daemon &&
+	tries=10 &&
+	while ! git -C "$1" fsmonitor--daemon status
+	do
+		test "$tries" -gt 0 || return 1
+		tries=$((tries - 1)) &&
+		sleep 1
+	done &&
+	for fdinfo in /proc/"$inotify_pid"/fdinfo/*
+	do
+		if grep -q "^inotify wd:" "$fdinfo" 2>/dev/null
+		then
+			inotify_fdinfo=$fdinfo &&
+			return 0
+		fi
+	done &&
+	return 1
+}
+
+inotify_watch_count () {
+	test -r "$inotify_fdinfo" &&
+	awk "/^inotify wd:/ { n++ } END { print n+0 }" "$inotify_fdinfo"
+}
+
+wait_for_inotify_watch_count () {
+	local actual tries &&
+	tries=10 &&
+	while test "$tries" -gt 0
+	do
+		actual=$(inotify_watch_count) || return 1
+		test "$actual" -eq "$1" && return 0
+		tries=$((tries - 1)) &&
+		sleep 1
+	done &&
+	echo >&2 "expected $1 inotify watches, found $actual" &&
+	return 1
+}
+
+test_expect_success INOTIFY_WATCHES 'moving nested trees out releases all their watches' '
+	test_when_finished "rm -rf test_watch_out retained" &&
+	git init test_watch_out &&
+	start_inotify_daemon test_watch_out &&
+	baseline=$(inotify_watch_count) &&
+	test "$baseline" -gt 0 &&
+	mkdir retained &&
+	for i in 1 2 3
+	do
+		mkdir -p "test_watch_out/tree$i/a/b" || return 1
+	done &&
+	wait_for_inotify_watch_count "$((baseline + 9))" &&
+	for i in 1 2 3
+	do
+		mv "test_watch_out/tree$i" "retained/tree$i" || return 1
+	done &&
+	wait_for_inotify_watch_count "$baseline" &&
+	for i in 1 2 3
+	do
+		test_path_is_dir "retained/tree$i/a/b" || return 1
+	done &&
+	git -C test_watch_out fsmonitor--daemon status
+'
+
+test_expect_success INOTIFY_WATCHES 'expiring move-outs preserves a descendant moved back inside' '
+	test_when_finished "rm -rf test_watch_return retained" &&
+	git init test_watch_return &&
+	mkdir -p test_watch_return/gone/child/deep \
+		test_watch_return/gone/left/deep \
+		test_watch_return/gone-keep/deep retained/staging &&
+	echo 1 >test_watch_return/gone/child/deep/file &&
+	echo 1 >test_watch_return/gone-keep/deep/file &&
+	git -C test_watch_return config core.fsmonitor true &&
+	start_inotify_daemon test_watch_return &&
+	baseline=$(inotify_watch_count) &&
+
+	# Queue the moves together so expiry cannot run between them.
+	kill -STOP "$inotify_pid" &&
+	retry_grep "^State:.*T" /proc/"$inotify_pid"/status &&
+	mv test_watch_return/gone retained/parent &&
+	mv retained/parent/left retained/left &&
+	mv retained/parent/child retained/staging/child &&
+	mv retained/staging test_watch_return/returned &&
+	kill -CONT "$inotify_pid" &&
+
+	# Add returned, retire gone and left/deep, preserve child/deep.
+	wait_for_inotify_watch_count "$((baseline - 2))" &&
+	test_path_is_dir retained/left/deep &&
+	test_path_is_dir retained/parent &&
+	git -C test_watch_return add . &&
+	git -C test_watch_return commit -q -m returned &&
+	git -C test_watch_return status --porcelain >actual &&
+	test_must_be_empty actual &&
+	sleep 2 &&
+
+	>test_watch_return/returned/child/deep/after-return &&
+	retry_grep "^event: returned/child/deep/after-return$" inotify.trace &&
+	echo 22 >test_watch_return/returned/child/deep/file &&
+	echo 22 >test_watch_return/gone-keep/deep/file &&
+	git -C test_watch_return status --porcelain >actual &&
+	git -C test_watch_return -c core.fsmonitor=false status --porcelain >expect &&
+	test_cmp expect actual &&
+	inotify_watch_count >actual
+'
+
+test_expect_success INOTIFY_WATCHES 'reusing a moved directory name retires the old subtree watches' '
+	test_when_finished "rm -rf test_watch_reuse retained" &&
+	git init test_watch_reuse &&
+	mkdir -p test_watch_reuse/tree/child/deep \
+		test_watch_reuse/tree/left/deep retained &&
+	start_inotify_daemon test_watch_reuse &&
+	baseline=$(inotify_watch_count) &&
+
+	# Returning to the same name must cancel the pending move-out.
+	kill -STOP "$inotify_pid" &&
+	retry_grep "^State:.*T" /proc/"$inotify_pid"/status &&
+	mv test_watch_reuse/tree retained/back &&
+	mv retained/back test_watch_reuse/tree &&
+	kill -CONT "$inotify_pid" &&
+	test-tool -C test_watch_reuse fsmonitor-client query --token 0 >actual &&
+	sleep 2 &&
+	wait_for_inotify_watch_count "$baseline" &&
+
+	# Reuse the name for a former child, retaining the other descendants.
+	kill -STOP "$inotify_pid" &&
+	retry_grep "^State:.*T" /proc/"$inotify_pid"/status &&
+	mv test_watch_reuse/tree retained/tree &&
+	mv retained/tree/child retained/staging &&
+	mv retained/staging test_watch_reuse/tree &&
+	kill -CONT "$inotify_pid" &&
+	wait_for_inotify_watch_count "$((baseline - 3))" &&
+	sleep 2 &&
+	>test_watch_reuse/tree/deep/after-reuse &&
+	retry_grep "^event: tree/deep/after-reuse$" inotify.trace &&
+	wait_for_inotify_watch_count "$((baseline - 3))" &&
+	test_path_is_dir retained/tree/left/deep &&
+	git -C test_watch_reuse fsmonitor--daemon status
+'
+
+for rename_kind in unmatched matched same-path
+do
+	test_expect_success INOTIFY_WATCHES "retire a child moved out before a $rename_kind parent rewalk" '
+		test_when_finished "rm -rf test_watch_rewalk retained" &&
+		git init test_watch_rewalk &&
+		mkdir -p test_watch_rewalk/old/child/deep \
+			test_watch_rewalk/old/keep/deep \
+			test_watch_rewalk/old-keep/deep retained &&
+		start_inotify_daemon test_watch_rewalk &&
+		baseline=$(inotify_watch_count) &&
+		kill -STOP "$inotify_pid" &&
+		retry_grep "^State:.*T" /proc/"$inotify_pid"/status &&
+		returned=returned &&
+		case "$rename_kind" in
+		unmatched)
+			mv test_watch_rewalk/old retained/staging &&
+			mv retained/staging test_watch_rewalk/returned
+			;;
+		matched)
+			mv test_watch_rewalk/old test_watch_rewalk/returned
+			;;
+		same-path)
+			returned=old &&
+			mv test_watch_rewalk/old retained/staging &&
+			mv retained/staging test_watch_rewalk/old
+			;;
+		esac &&
+		mv "test_watch_rewalk/$returned/child" retained/child &&
+		kill -CONT "$inotify_pid" &&
+		wait_for_inotify_watch_count "$((baseline - 2))" &&
+		test_path_is_dir retained/child/deep &&
+		sleep 2 &&
+		>"test_watch_rewalk/$returned/keep/deep/after-$rename_kind" &&
+		>"test_watch_rewalk/old-keep/deep/after-$rename_kind" &&
+		retry_grep "^event: $returned/keep/deep/after-$rename_kind$" inotify.trace &&
+		retry_grep "^event: old-keep/deep/after-$rename_kind$" inotify.trace &&
+		wait_for_inotify_watch_count "$((baseline - 2))" &&
+		git -C test_watch_rewalk fsmonitor--daemon status
+	'
+done
+
+test_expect_success INOTIFY_WATCHES 'rewalk cleanup preserves new directories at the old path' '
+	test_when_finished "rm -rf test_watch_replace retained" &&
+	git init test_watch_replace &&
+	mkdir -p test_watch_replace/old/child/deep retained &&
+	start_inotify_daemon test_watch_replace &&
+	baseline=$(inotify_watch_count) &&
+	kill -STOP "$inotify_pid" &&
+	retry_grep "^State:.*T" /proc/"$inotify_pid"/status &&
+	mv test_watch_replace/old retained/staging &&
+	mv retained/staging test_watch_replace/returned &&
+	mkdir -p test_watch_replace/old/child/deep &&
+	kill -CONT "$inotify_pid" &&
+	wait_for_inotify_watch_count "$((baseline + 3))" &&
+	sleep 2 &&
+	>test_watch_replace/returned/child/deep/after-original &&
+	>test_watch_replace/old/child/deep/after-replacement &&
+	retry_grep "^event: returned/child/deep/after-original$" inotify.trace &&
+	retry_grep "^event: old/child/deep/after-replacement$" inotify.trace &&
+	wait_for_inotify_watch_count "$((baseline + 3))" &&
+	git -C test_watch_replace fsmonitor--daemon status
+'
+
 # The next few test cases exercise the token-resync code.  When filesystem
 # drops events (because of filesystem velocity or because the daemon isn't
 # polling fast enough), we need to discard the cached data (relative to the

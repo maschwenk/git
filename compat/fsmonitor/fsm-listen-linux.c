@@ -11,14 +11,6 @@
 
 #include <sys/inotify.h>
 
-/*
- * Safe value to bitwise OR with rest of mask for
- * kernels that do not support IN_MASK_CREATE
- */
-#ifndef IN_MASK_CREATE
-#define IN_MASK_CREATE 0x00000000
-#endif
-
 enum shutdown_reason {
 	SHUTDOWN_CONTINUE = 0,
 	SHUTDOWN_STOP,
@@ -31,6 +23,8 @@ struct watch_entry {
 	int wd;
 	uint32_t cookie;
 	const char *dir;
+	/* Last successful add_watch(), in the descriptor-to-path map only. */
+	uint64_t generation;
 };
 
 struct rename_entry {
@@ -40,12 +34,20 @@ struct rename_entry {
 	const char *dir;
 };
 
+struct stale_entry {
+	struct hashmap_entry ent;
+	const char *dir;
+	uint64_t cutoff;
+};
+
 struct fsm_listen_data {
 	int fd_inotify;
 	enum shutdown_reason shutdown;
 	struct hashmap watches;
 	struct hashmap renames;
 	struct hashmap revwatches;
+	struct hashmap stale_dirs;
+	uint64_t watch_generation;
 };
 
 static int watch_entry_cmp(const void *cmp_data UNUSED,
@@ -84,34 +86,131 @@ static int rename_entry_cmp(const void *cmp_data UNUSED,
 	return e1->cookie != e2->cookie;
 }
 
+static int stale_entry_cmp(const void *cmp_data UNUSED,
+			   const struct hashmap_entry *eptr,
+			   const struct hashmap_entry *entry_or_key,
+			   const void *keydata UNUSED)
+{
+	const struct stale_entry *e1, *e2;
+
+	e1 = container_of(eptr, const struct stale_entry, ent);
+	e2 = container_of(entry_or_key, const struct stale_entry, ent);
+	return strcmp(e1->dir, e2->dir);
+}
+
+static struct watch_entry *find_watch_by_dir(const char *dir,
+					     struct fsm_listen_data *data)
+{
+	struct watch_entry k;
+
+	k.dir = dir;
+	hashmap_entry_init(&k.ent, strhash(dir));
+	return hashmap_get_entry(&data->revwatches, &k, ent, NULL);
+}
+
+/*
+ * Forget the pending rename, if any, of the directory watched by "w", an
+ * entry of the reverse mapping.
+ */
+static void forget_dir_rename(struct watch_entry *w,
+			      struct fsm_listen_data *data)
+{
+	struct rename_entry k;
+
+	if (!w->cookie)
+		return;
+	k.cookie = w->cookie;
+	hashmap_entry_init(&k.ent, memhash(&k.cookie, sizeof(uint32_t)));
+	free(hashmap_remove_entry(&data->renames, &k, ent, NULL));
+	w->cookie = 0;
+}
+
+static void remove_watch(struct watch_entry *w, struct fsm_listen_data *data);
+
+/* Retain cleanup responsibility even after the root watch changes paths. */
+static void mark_stale_directory(const char *dir, struct fsm_listen_data *data)
+{
+	struct stale_entry k, *stale;
+
+	k.dir = dir;
+	hashmap_entry_init(&k.ent, strhash(dir));
+	stale = hashmap_get_entry(&data->stale_dirs, &k, ent, NULL);
+	if (!stale) {
+		CALLOC_ARRAY(stale, 1);
+		stale->dir = dir;
+		hashmap_entry_init(&stale->ent, k.ent.hash);
+		hashmap_add(&data->stale_dirs, &stale->ent);
+	}
+	stale->cutoff = data->watch_generation;
+}
+
 /*
  * Register an inotify watch, add watch descriptor to path mapping
  * and the reverse mapping.
+ *
+ * The directory may already be watched under another name, because it
+ * was renamed without the daemon seeing both events of the rename (or
+ * because it is a subdirectory of a renamed directory). In that case, move
+ * the existing watch to the new name so that its events are reported
+ * under the right path.
  */
 static int add_watch(const char *path, struct fsm_listen_data *data)
 {
 	const char *interned = strintern(path);
-	struct watch_entry *w1, *w2;
+	struct watch_entry k, *w1, *w2;
 
-	/* add the inotify watch, don't allow watches to be modified */
+	/* returns the existing watch descriptor if there is one */
 	int wd = inotify_add_watch(data->fd_inotify, interned,
-				   (IN_ALL_EVENTS | IN_ONLYDIR | IN_MASK_CREATE)
+				   (IN_ALL_EVENTS | IN_ONLYDIR)
 				    ^ IN_ACCESS ^ IN_CLOSE ^ IN_OPEN);
 	if (wd < 0) {
 		if (errno == ENOENT || errno == ENOTDIR)
 			return 0; /* directory was deleted or is not a directory */
-		if (errno == EEXIST)
-			return 0; /* watch already exists, no action needed */
 		if (errno == ENOSPC)
 			return error(_("inotify watch limit reached; "
 				       "increase fs.inotify.max_user_watches"));
 		return error_errno(_("inotify_add_watch('%s') failed"), interned);
 	}
 
+	k.wd = wd;
+	hashmap_entry_init(&k.ent, memhash(&k.wd, sizeof(int)));
+	w1 = hashmap_get_entry(&data->watches, &k, ent, NULL);
+	if (w1 && w1->dir == interned) {
+		/* it may have been renamed away and back */
+		w2 = find_watch_by_dir(interned, data);
+		if (w2->cookie)
+			mark_stale_directory(interned, data);
+		forget_dir_rename(w2, data);
+		w1->generation = ++data->watch_generation;
+		return 0;
+	}
+
+	/* whatever directory we watched under this name is gone from it */
+	w2 = find_watch_by_dir(interned, data);
+	if (w2) {
+		mark_stale_directory(interned, data);
+		remove_watch(w2, data);
+	}
+
+	if (w1) {
+		trace_printf_key(&trace_fsmonitor, "watch moved from '%s' to '%s'",
+				 w1->dir, interned);
+		mark_stale_directory(w1->dir, data);
+		w2 = find_watch_by_dir(w1->dir, data);
+		hashmap_remove(&data->revwatches, &w2->ent, NULL);
+		forget_dir_rename(w2, data);
+		w1->dir = w2->dir = interned;
+		w1->generation = ++data->watch_generation;
+		hashmap_entry_init(&w2->ent, strhash(interned));
+		hashmap_add(&data->revwatches, &w2->ent);
+		return 0;
+	}
+
 	/* add watch descriptor -> directory mapping */
 	CALLOC_ARRAY(w1, 1);
 	w1->wd = wd;
 	w1->dir = interned;
+	w1->generation = ++data->watch_generation;
 	hashmap_entry_init(&w1->ent, memhash(&w1->wd, sizeof(int)));
 	hashmap_add(&data->watches, &w1->ent);
 
@@ -143,14 +242,14 @@ static void remove_watch(struct watch_entry *w, struct fsm_listen_data *data)
 	if (!w1)
 		BUG("double remove of watch for '%s'", w->dir);
 
-	if (w1->cookie)
-		BUG("removing watch for '%s' which has a pending rename", w1->dir);
-
 	k2.dir = w->dir;
 	hashmap_entry_init(&k2.ent, strhash(k2.dir));
 	w2 = hashmap_remove_entry(&data->revwatches, &k2, ent, NULL);
 	if (!w2)
 		BUG("double remove of reverse watch for '%s'", w->dir);
+
+	/* e.g. the directory was moved out of the worktree and deleted */
+	forget_dir_rename(w2, data);
 
 	/* w1->dir and w2->dir are interned strings, we don't own them */
 	free(w1);
@@ -158,7 +257,54 @@ static void remove_watch(struct watch_entry *w, struct fsm_listen_data *data)
 }
 
 /*
- * Check for stale directory renames.
+ * Sweep once per event batch, after registering moved directories. A
+ * descendant missing from the rewalk may still have its old path, even
+ * when its parent's pending rename has been cleared. Retire it unless
+ * add_watch() validated that path after it was marked stale. This also
+ * protects new directories reusing the old name before the sweep.
+ */
+static void retire_stale_watches(struct fsm_listen_data *data)
+{
+	struct hashmap_iter iter;
+	struct watch_entry *w, **to_remove = NULL;
+	struct strbuf path = STRBUF_INIT;
+	size_t nr = 0, alloc = 0;
+
+	if (!hashmap_get_size(&data->stale_dirs))
+		return;
+
+	/* Collect first: removal also changes the pending rename map. */
+	hashmap_for_each_entry(&data->watches, &iter, w, ent) {
+		strbuf_reset(&path);
+		strbuf_addstr(&path, w->dir);
+		for (;;) {
+			struct stale_entry k, *stale;
+			char *slash;
+
+			k.dir = path.buf;
+			hashmap_entry_init(&k.ent, strhash(path.buf));
+			stale = hashmap_get_entry(&data->stale_dirs, &k, ent, NULL);
+			if (stale && w->generation <= stale->cutoff) {
+				ALLOC_GROW(to_remove, nr + 1, alloc);
+				to_remove[nr++] = w;
+				break;
+			}
+			slash = strrchr(path.buf, '/');
+			if (!slash)
+				break;
+			strbuf_setlen(&path, slash - path.buf);
+		}
+	}
+
+	for (size_t i = 0; i < nr; i++)
+		remove_watch(to_remove[i], data);
+	free(to_remove);
+	strbuf_release(&path);
+	hashmap_partial_clear_and_free(&data->stale_dirs, struct stale_entry, ent);
+}
+
+/*
+ * Give up on stale directory renames.
  *
  * https://man7.org/linux/man-pages/man7/inotify.7.html
  *
@@ -166,26 +312,30 @@ static void remove_watch(struct watch_entry *w, struct fsm_listen_data *data)
  * IN_MOVED_FROM+IN_MOVED_TO event pair is not atomic, and the possibility that
  * there may not be any IN_MOVED_TO event.
  *
- * If the IN_MOVED_TO event is not received within the timeout then events have
- * been missed and the monitor is in an inconsistent state with respect to the
- * filesystem.
+ * Treat an expired rename as a move out of the watched tree, although the
+ * missing IN_MOVED_TO may only be delayed. Retire the whole subtree to
+ * release its watches. The IN_MOVED_FROM already reported the old path;
+ * a later IN_MOVED_TO will watch and scan the destination again.
  */
-static int check_stale_dir_renames(struct hashmap *renames, time_t max_age)
+static void expire_dir_renames(struct fsm_listen_data *data, time_t max_age)
 {
 	struct rename_entry *re;
 	struct hashmap_iter iter;
 
-	hashmap_for_each_entry(renames, &iter, re, ent) {
-		if (re->whence <= max_age)
-			return -1;
-	}
-	return 0;
+	hashmap_for_each_entry(&data->renames, &iter, re, ent)
+		if (re->whence <= max_age) {
+			trace_printf_key(&trace_fsmonitor,
+					 "no IN_MOVED_TO for '%s', retiring subtree watches",
+					 re->dir);
+			mark_stale_directory(re->dir, data);
+		}
+	retire_stale_watches(data);
 }
 
 /*
  * Track pending renames.
  *
- * Tracking is done via an event cookie to watch descriptor mapping.
+ * Tracking is done via an event cookie to source path mapping.
  *
  * A rename is not complete until matching an IN_MOVED_TO event is received
  * for a corresponding IN_MOVED_FROM event.
@@ -193,13 +343,10 @@ static int check_stale_dir_renames(struct hashmap *renames, time_t max_age)
 static void add_dir_rename(uint32_t cookie, const char *path,
 			   struct fsm_listen_data *data)
 {
-	struct watch_entry k, *w;
+	struct watch_entry *w;
 	struct rename_entry *re;
 
-	/* lookup the watch descriptor for the given path */
-	k.dir = path;
-	hashmap_entry_init(&k.ent, strhash(path));
-	w = hashmap_get_entry(&data->revwatches, &k, ent, NULL);
+	w = find_watch_by_dir(path, data);
 	if (!w) {
 		/*
 		 * This can happen in rare cases where the directory was
@@ -210,6 +357,7 @@ static void add_dir_rename(uint32_t cookie, const char *path,
 				 "no watch found for rename from '%s'", path);
 		return;
 	}
+	forget_dir_rename(w, data);
 	w->cookie = cookie;
 
 	/* add the pending rename to match against later */
@@ -225,38 +373,27 @@ static void add_dir_rename(uint32_t cookie, const char *path,
  * Handle directory renames
  *
  * Once an IN_MOVED_TO event is received, lookup the rename tracking information
- * via the event cookie and use this information to update the watch.
+ * via the event cookie and retain cleanup of the source subtree. The
+ * following add_watch() and rewalk validate watches at their new paths.
  */
 static void rename_dir(uint32_t cookie, const char *path,
 		       struct fsm_listen_data *data)
 {
 	struct rename_entry rek, *re;
-	struct watch_entry k, *w;
+	struct watch_entry *w;
 
 	/* lookup a pending rename to match */
 	rek.cookie = cookie;
 	hashmap_entry_init(&rek.ent, memhash(&rek.cookie, sizeof(uint32_t)));
-	re = hashmap_get_entry(&data->renames, &rek, ent, NULL);
+	re = hashmap_remove_entry(&data->renames, &rek, ent, NULL);
 	if (re) {
-		k.dir = re->dir;
-		hashmap_entry_init(&k.ent, strhash(k.dir));
-		w = hashmap_get_entry(&data->revwatches, &k, ent, NULL);
-		if (w) {
+		mark_stale_directory(re->dir, data);
+		w = find_watch_by_dir(re->dir, data);
+		if (w)
 			w->cookie = 0; /* rename handled */
-			remove_watch(w, data);
-			if (add_watch(path, data))
-				trace_printf_key(&trace_fsmonitor,
-						 "failed to add watch for renamed dir '%s'",
-						 path);
-		} else {
-			/* Directory was moved out of watch tree */
-			trace_printf_key(&trace_fsmonitor,
-					 "no matching watch for rename to '%s'", path);
-		}
-		hashmap_remove_entry(&data->renames, &rek, ent, NULL);
 		free(re);
 	} else {
-		/* Directory was moved from outside the watch tree */
+		/* The source may have been outside the watched tree. */
 		trace_printf_key(&trace_fsmonitor,
 				 "no matching cookie for rename to '%s'", path);
 	}
@@ -422,6 +559,7 @@ int fsm_listen__ctor(struct fsmonitor_daemon_state *state)
 	hashmap_init(&data->watches, watch_entry_cmp, NULL, 0);
 	hashmap_init(&data->renames, rename_entry_cmp, NULL, 0);
 	hashmap_init(&data->revwatches, revwatches_entry_cmp, NULL, 0);
+	hashmap_init(&data->stale_dirs, stale_entry_cmp, NULL, 0);
 
 	if (add_watch(state->path_worktree_watch.buf, data))
 		ret = -1;
@@ -479,6 +617,7 @@ void fsm_listen__dtor(struct fsmonitor_daemon_state *state)
 	hashmap_clear(&data->revwatches); /* remove_watch freed the entries */
 
 	hashmap_clear_and_free(&data->renames, struct rename_entry, ent);
+	hashmap_clear_and_free(&data->stale_dirs, struct stale_entry, ent);
 
 	FREE_AND_NULL(state->listen_data);
 
@@ -557,7 +696,9 @@ static int process_event(const char *path,
 		/* received IN_MOVE_TO, update watch to reflect new path */
 		if (em_rename_dir_to(event->mask)) {
 			rename_dir(event->cookie, path, state->listen_data);
-			if (register_inotify(path, state, *batch)) {
+			/* in case there was no IN_MOVED_FROM to match */
+			if (add_watch(path, state->listen_data) ||
+			    register_inotify(path, state, *batch)) {
 				state->listen_data->shutdown = SHUTDOWN_ERROR;
 				goto done;
 			}
@@ -665,6 +806,7 @@ static void handle_events(struct fsmonitor_daemon_state *state)
 			free(p);
 		}
 		strbuf_reset(&path);
+		retire_stale_watches(state->listen_data);
 		fsmonitor_publish(state, batch, &cookie_list);
 		string_list_clear(&cookie_list, 0);
 		batch = NULL;
@@ -684,9 +826,8 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	int poll_num;
 	/*
 	 * Interval in seconds between checks for stale directory renames.
-	 * A directory rename that is not completed within this window
-	 * (i.e. no matching IN_MOVED_TO for an IN_MOVED_FROM) indicates
-	 * missed events, forcing a shutdown.
+	 * A directory rename not completed within this window is treated
+	 * as a move out of the watched tree.
 	 */
 	const int interval = 1;
 	time_t checked = time(NULL);
@@ -715,13 +856,8 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 
 			if ((time(NULL) - checked) >= interval) {
 				checked = time(NULL);
-				if (check_stale_dir_renames(&state->listen_data->renames,
-							    checked - interval)) {
-					trace_printf_key(&trace_fsmonitor,
-							 "missed IN_MOVED_TO events, forcing shutdown");
-					state->listen_data->shutdown = SHUTDOWN_FORCE;
-					continue;
-				}
+				expire_dir_renames(state->listen_data,
+						   checked - interval);
 			}
 
 			if (poll_num > 0 && (fds[0].revents & POLLIN))
