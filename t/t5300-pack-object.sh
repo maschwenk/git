@@ -766,4 +766,17 @@ test_expect_success '--path-walk thin pack' '
 	git -C server index-pack --fix-thin --stdin <out.pack
 '
 
+test_expect_success 'indexPack.unsafeObjectHash does not change what index-pack writes' '
+	cat >in <<-EOF &&
+	$(git -C server rev-parse HEAD)
+	^$(git -C server rev-parse HEAD~2)
+	EOF
+	git -C server pack-objects --thin --stdout --revs <in >thin.pack &&
+	git -C server index-pack --fix-thin --stdin "$(pwd)/default.pack" <thin.pack &&
+	git -C server -c indexPack.unsafeObjectHash=true \
+		index-pack --fix-thin --stdin "$(pwd)/unsafe.pack" <thin.pack &&
+	test_cmp_bin default.pack unsafe.pack &&
+	test_cmp_bin default.idx unsafe.idx
+'
+
 test_done
