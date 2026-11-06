@@ -374,7 +374,7 @@ static const char *open_pack_file(const char *pack_name)
 		output_fd = -1;
 		nothread_data.pack_fd = input_fd;
 	}
-	git_hash_init(&input_ctx, the_hash_algo);
+	git_hash_init(&input_ctx, unsafe_hash_algo(the_hash_algo));
 	return pack_name;
 }
 
@@ -1291,7 +1291,7 @@ static void parse_pack_objects(unsigned char *hash)
 
 	/* Check pack integrity */
 	flush();
-	git_hash_init(&tmp_ctx, the_hash_algo);
+	git_hash_init(&tmp_ctx, unsafe_hash_algo(the_hash_algo));
 	git_hash_clone(&tmp_ctx, &input_ctx);
 	git_hash_final(hash, &tmp_ctx);
 	if (!hasheq(fill(the_hash_algo->rawsz), hash, the_repository->hash_algo))
