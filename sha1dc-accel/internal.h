@@ -13,9 +13,11 @@
 /*
  * Which forms this build can have. The vector and hardware forms need
  * GCC-compatible target attributes and intrinsics; anything else gets the
- * portable form, which every build has.
+ * portable form, which every build has. Sparse checks the portable form
+ * because its intrinsic support is incomplete.
  */
-#if defined(__GNUC__) && !defined(SHA1DC_ACCEL_PORTABLE_ONLY)
+#if defined(__GNUC__) && !defined(__CHECKER__) && \
+	!defined(SHA1DC_ACCEL_PORTABLE_ONLY)
 # if defined(__x86_64__) && (defined(__clang__) || __GNUC__ >= 5)
 #  define SHA1DC_HAVE_SSE2 1
 #  define SHA1DC_HAVE_AVX2 1
