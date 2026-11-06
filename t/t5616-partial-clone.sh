@@ -747,6 +747,117 @@ test_expect_success 'after fetching descendants of non-promisor commits, gc work
 	git -C partial gc --prune=now
 '
 
+# Print the objects stored in the local packs of repository "$1", sorted.
+local_packed_objects () {
+	for idx in "$1"/.git/objects/pack/*.idx
+	do
+		git show-index <"$idx" || return 1
+	done >packed.raw &&
+	cut -d" " -f2 packed.raw | sort
+}
+
+# Create "alt-server", a copy of its history in "alt-ref" with objects
+# stored "$1" (loose or packed), and "alt-client", a partial clone of
+# "alt-server" that borrows that history from "alt-ref".
+setup_alt_clone () {
+	git init alt-server &&
+	git -C alt-server config uploadpack.allowfilter 1 &&
+	git -C alt-server config uploadpack.allowanysha1inwant 1 &&
+	test_commit -C alt-server one &&
+	test_commit -C alt-server two &&
+	git clone --bare alt-server alt-ref &&
+	if test "$1" = packed
+	then
+		git -C alt-ref repack -a -d
+	fi &&
+	git clone --reference alt-ref --filter=blob:none \
+		"file://$(pwd)/alt-server" alt-client
+}
+
+for alt_storage in loose packed
+do
+	test_expect_success "fetch does not repack $alt_storage objects borrowed from an alternate" '
+		test_when_finished "rm -rf alt-server alt-ref alt-client" &&
+		setup_alt_clone $alt_storage &&
+		test_commit -C alt-server three &&
+		git -C alt-client fetch origin &&
+
+		# "three" refers to "two", which alt-client borrows from
+		# alt-ref and must not copy.
+		git -C alt-server rev-parse three three^{tree} >expect.raw &&
+		sort expect.raw >expect &&
+		local_packed_objects alt-client >actual &&
+		test_cmp expect actual
+	'
+done
+
+test_expect_success 'fetch repacks local objects without copying their borrowed history' '
+	test_when_finished "rm -rf alt-server alt-ref alt-client" &&
+	setup_alt_clone loose &&
+	test_commit -C alt-client local &&
+	git -C alt-client push origin HEAD:refs/heads/topic &&
+	git -C alt-server checkout topic &&
+	test_commit -C alt-server three &&
+	git -C alt-client fetch origin &&
+
+	# "local" is repacked into a promisor pack because "three" refers
+	# to it, but "two" and the blobs of "one" and "two" stay borrowed.
+	git -C alt-client rev-parse local local^{tree} local:local.t >expect.raw &&
+	git -C alt-server rev-parse three three^{tree} >>expect.raw &&
+	sort expect.raw >expect &&
+	local_packed_objects alt-client >actual &&
+	test_cmp expect actual &&
+
+	git -C alt-client gc --prune=now &&
+	git -C alt-client fsck &&
+	git -C alt-client log --format=%s origin/topic >actual &&
+	test_write_lines three local two one >expect &&
+	test_cmp expect actual
+'
+
+for alt_graph in cyclic incomplete
+do
+	for link in direct indirect
+	do
+		test_expect_success "promisor repack traverses $link links through $alt_graph alternates" '
+			test_when_finished "rm -rf link-client link-alt" &&
+			git init link-client &&
+			git -C link-client config remote.origin.promisor true &&
+			git -C link-client config remote.origin.url "$(pwd)/missing-server" &&
+			test_commit -C link-client local-root &&
+			git -C link-client repack -a -d &&
+			root=$(git -C link-client rev-parse HEAD) &&
+			git init --bare link-alt &&
+			echo "$(pwd)/link-client/.git/objects" >link-alt/objects/info/alternates &&
+			echo "$(pwd)/link-alt/objects" >link-client/.git/objects/info/alternates &&
+			empty_tree=$(git -C link-alt mktree </dev/null) &&
+			borrowed=$(git -C link-alt commit-tree "$empty_tree" -p "$root" -m borrowed) &&
+			if test "$alt_graph" = incomplete
+			then
+				rm link-alt/objects/info/alternates
+			fi &&
+			parent=$borrowed &&
+			if test "$link" = indirect
+			then
+				parent=$(git -C link-client commit-tree "$empty_tree" -p "$borrowed" -m local-link)
+			fi &&
+			incoming=$(git -C link-client commit-tree "$empty_tree" -p "$parent" -m incoming) &&
+			echo "$incoming" | git -C link-client pack-objects --stdout >incoming.pack &&
+			git -C link-client index-pack --stdin --promisor <incoming.pack &&
+			git -C link-client update-ref refs/heads/main "$incoming" &&
+			git -C link-client tag -d local-root &&
+			git -C link-client reflog expire --expire=now --all &&
+			git -C link-client gc --prune=now &&
+			git -C link-client fsck &&
+			git -C link-client cat-file blob "$root:local-root.t" >actual &&
+			echo local-root >expect &&
+			test_cmp expect actual &&
+			local_packed_objects link-client >actual &&
+			test_grep "$root" actual
+		'
+	done
+done
+
 
 . "$TEST_DIRECTORY"/lib-httpd.sh
 start_httpd
