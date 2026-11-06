@@ -51,6 +51,13 @@ int dummy_pthread_init(void *);
 #endif
 
 int online_cpus(void);
+
+/*
+ * Returns 1 if SMT is active, 0 if every CPU has its own core, and -1
+ * if the topology cannot be determined. Unknown platforms return -1.
+ */
+int smt_active(void);
+
 int init_recursive_mutex(pthread_mutex_t*);
 
 
