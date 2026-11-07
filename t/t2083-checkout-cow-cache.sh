@@ -671,4 +671,78 @@ test_expect_success COW_FS 'zero byte limit rejects empty misses but allows exis
 	verify_checkout empty-limit
 '
 
+test_lazy_prereq COW_MAC_XATTR '
+	test "$uname_s" = Darwin &&
+	>metadata-probe &&
+	xattr -w com.git.checkout-cow probe metadata-probe &&
+	xattr -p com.git.checkout-cow metadata-probe >actual &&
+	echo probe >expect &&
+	test_cmp expect actual &&
+	xattr -d com.git.checkout-cow metadata-probe
+'
+
+test_lazy_prereq COW_MAC_FLAGS '
+	test "$uname_s" = Darwin &&
+	>flags-probe &&
+	chflags uchg flags-probe &&
+	chflags nouchg flags-probe
+'
+
+for metadata in xattr flags
+do
+	case $metadata in
+	xattr) prereq=COW_MAC_XATTR ;;
+	flags) prereq=COW_MAC_FLAGS ;;
+	esac
+
+	test_expect_success COW_FS,$prereq "macOS $metadata rejects clones without altering cache metadata" '
+		repo=metadata-$metadata &&
+		setup_repo "$repo" &&
+		oid=$(git -C "$repo" rev-parse HEAD:file) &&
+		rm "$repo/file" &&
+		checkout_with_trace metadata-warm-$metadata.trace \
+			git -C "$repo" checkout-index --index file &&
+		assert_cloned metadata-warm-$metadata.trace "$oid" &&
+		cache=$(cache_path "$repo" "$oid") &&
+		case $metadata in
+		xattr)
+			chmod u+w "$cache" &&
+			xattr -w com.git.checkout-cow probe "$cache" &&
+			chmod 0444 "$cache"
+			;;
+		flags)
+			test_when_finished "chflags nouchg \"$cache\"" &&
+			chflags uchg "$cache"
+			;;
+		esac &&
+		rm "$repo/file" &&
+		checkout_with_trace metadata-fallback-$metadata.trace \
+			git -C "$repo" checkout-index --index file &&
+		assert_no_clones metadata-fallback-$metadata.trace &&
+		assert_fixture "$repo" &&
+		find "$repo" -name ".git-cow-*" >temps &&
+		test_must_be_empty temps &&
+		case $metadata in
+		xattr)
+			xattr -p com.git.checkout-cow "$cache" >actual &&
+			echo probe >expect &&
+			test_cmp expect actual &&
+			chmod u+w "$cache" &&
+			xattr -d com.git.checkout-cow "$cache" &&
+			chmod 0444 "$cache"
+			;;
+		flags)
+			ls -lO "$cache" >flags &&
+			test_grep uchg flags &&
+			chflags nouchg "$cache"
+			;;
+		esac &&
+		rm "$repo/file" &&
+		checkout_with_trace metadata-recovery-$metadata.trace \
+			git -C "$repo" checkout-index --index file &&
+		assert_cloned metadata-recovery-$metadata.trace "$oid" &&
+		assert_fixture "$repo"
+	'
+done
+
 test_done
