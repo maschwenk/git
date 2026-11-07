@@ -22,8 +22,11 @@
 #if !defined(NO_COW_CHECKOUT) && (defined(__linux__) || defined(__APPLE__))
 #include <sys/file.h>
 #ifdef __linux__
-#include <linux/fs.h>
 #include <sys/ioctl.h>
+/* Stable Linux ioctl ABI; avoid a dependency on kernel development headers. */
+#ifndef FICLONE
+#define FICLONE _IOW(0x94, 9, int)
+#endif
 #endif
 #ifdef __APPLE__
 #include <sys/acl.h>
