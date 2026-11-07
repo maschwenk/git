@@ -32,6 +32,7 @@ cache_path () {
 }
 
 setup_repo () {
+	mkdir -m 700 "$1" &&
 	git init "$1" &&
 	(
 		cd "$1" &&
@@ -49,6 +50,7 @@ setup_repo () {
 }
 
 setup_text_repo () {
+	mkdir -m 700 "$1" &&
 	git init "$1" &&
 	(
 		cd "$1" &&
@@ -427,6 +429,7 @@ test_expect_success SYMLINKS 'symlinked cache directories are not traversed' '
 
 test_expect_success COW_FS 'linked worktrees share cache and isolate in-place writes and truncation' '
 	setup_repo shared &&
+	mkdir -m 700 shared-a shared-b shared-after &&
 	oid=$(git -C shared rev-parse HEAD:file) &&
 	checkout_with_trace shared-a.trace \
 		git -C shared worktree add --detach "$TRASH_DIRECTORY/shared-a" HEAD &&
@@ -531,6 +534,7 @@ run_concurrent_checkouts () {
 
 test_expect_success COW_FS 'concurrent worktrees publish complete reusable cache entries' '
 	setup_repo race &&
+	mkdir -m 700 race-a race-b &&
 	git -C race config checkout.workers 2 &&
 	git -C race worktree add --detach --no-checkout "$TRASH_DIRECTORY/race-a" HEAD &&
 	git -C race worktree add --detach --no-checkout "$TRASH_DIRECTORY/race-b" HEAD &&
@@ -601,6 +605,7 @@ done
 
 test_expect_success COW_FS 'clearing shared cache preserves worktrees and allows repopulation' '
 	setup_repo clear &&
+	mkdir -m 700 clear-linked &&
 	rm clear/file clear/other clear/executable &&
 	git -C clear checkout-index --index --all --force &&
 	oid=$(git -C clear rev-parse HEAD:file) &&
@@ -744,5 +749,28 @@ do
 		assert_fixture "$repo"
 	'
 done
+
+test_expect_success COW_FS,POSIXPERM 'group-writable destinations bypass warm cache until made safe' '
+	setup_repo writable &&
+	oid=$(git -C writable rev-parse HEAD:file) &&
+	rm writable/file &&
+	checkout_with_trace writable-seed.trace \
+		git -C writable checkout-index --index file &&
+	assert_cloned writable-seed.trace "$oid" &&
+	chmod 0775 writable &&
+	rm writable/file writable/executable &&
+	checkout_with_trace writable-bypass.trace \
+		git -C writable -c checkout.workers=2 \
+		checkout-index --index file executable &&
+	assert_no_clones writable-bypass.trace &&
+	assert_fixture writable &&
+	chmod 0755 writable &&
+	rm writable/file writable/executable &&
+	checkout_with_trace writable-safe.trace \
+		git -C writable -c checkout.workers=2 \
+		checkout-index --index file executable &&
+	assert_cloned writable-safe.trace "$oid" &&
+	assert_fixture writable
+'
 
 test_done
