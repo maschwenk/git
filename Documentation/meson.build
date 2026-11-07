@@ -18,6 +18,7 @@ manpages = {
   'git-check-mailmap.adoc' : 1,
   'git-checkout-index.adoc' : 1,
   'git-checkout.adoc' : 1,
+  'git-checkout-cache.adoc' : 1,
   'git-check-ref-format.adoc' : 1,
   'git-cherry-pick.adoc' : 1,
   'git-cherry.adoc' : 1,
