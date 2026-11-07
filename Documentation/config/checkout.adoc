@@ -42,3 +42,46 @@ well the parallel version performs.
 	the parallelization gains. This setting allows you to define the minimum
 	number of files for which parallel checkout should be attempted. The
 	default is 100.
+
+`checkout.cowCache`::
+	Enable the experimental copy-on-write checkout cache. Defaults to false.
+	Git retains uncompressed blob contents under
+	`$GIT_COMMON_DIR/checkout-cache/v1/<hash-algorithm>/` and clones those
+	contents into working trees using APFS cloning on macOS or reflinks on
+	Linux. The cache and working tree must be on a filesystem supporting
+	this operation. Unsupported filesystems and other cache failures fall
+	back to ordinary checkout.
++
+This applies to regular files in sequential and parallel checkout, including
+`git worktree add`. Files needing checkout filters, encoding conversion,
+ident expansion or CRLF output use ordinary checkout. Replacement objects
+and temporary checkout files also bypass the cache. Cached contents are
+verified against the blob object ID after cloning and before publication.
+Working trees have distinct writable inodes; editing one cannot modify the
+cache or another worktree.
++
+The cache requires user-owned, private directories. Destination directories
+writable by other users, and macOS directories with extended ACLs, bypass
+it. Cache population uses one nonblocking writer lock for the lifetime of
+the process. Other processes can read hits but fall back on misses, so a
+cold parallel checkout may only populate part of the cache. A warm serial
+checkout can populate more entries for later parallel checkouts.
++
+The cache adds an uncompressed copy and filesystem metadata; its cost must
+be included when measuring savings. It does not share dependency installs
+or build outputs. There is no automatic eviction. When either admission
+limit is reached, existing entries remain usable and misses use ordinary
+checkout. Use linkgit:git-checkout-cache[1] to clear entries safely. This is
+an expendable cache, not an object database or a backup.
+
+`checkout.cowCacheMaxBytes`::
+	Maximum total logical size of retained cache files admitted by a writer.
+	Defaults to 1 GiB. Suffixes `k`, `m` and `g` are supported. Files left
+	by interrupted population count toward the limit. Reducing the limit
+	does not remove existing entries. This is not a limit on physical disk
+	usage, which also includes filesystem metadata and shared blocks.
+
+`checkout.cowCacheMaxEntries`::
+	Maximum retained cache files admitted by a writer, including interrupted
+	population files. Defaults to 100000. A zero byte or entry limit prevents
+	new entries without disabling existing cache hits.

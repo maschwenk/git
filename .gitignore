@@ -34,6 +34,7 @@
 /git-check-ref-format
 /git-checkout
 /git-checkout--worker
+/git-checkout-cache
 /git-checkout-index
 /git-cherry
 /git-cherry-pick
