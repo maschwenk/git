@@ -1,0 +1,19 @@
+indexPack.unsafeObjectHash::
+	If true, linkgit:git-index-pack[1] hashes the objects it reads
+	with `--stdin` using the SHA-1 implementation without collision
+	detection that Git was built with (listed as
+	`non-collision-detecting-SHA-1` by `git version --build-options`).
+	That is how linkgit:git-fetch[1], linkgit:git-clone[1] and
+	linkgit:git-receive-pack[1] store the packs they receive.
+	Defaults to false.
++
+This trades away SHA-1 collision detection, Git's defense against
+attacks such as SHAttered, for speed. An object crafted to collide with
+another is accepted under that other object's name, unless the
+repository already has that object. Only set this if you trust the
+source of every pack this repository receives.
++
+It has no effect if Git was built without a separate
+non-collision-detecting SHA-1, in SHA-256 repositories, or on packs
+small enough to be unpacked by linkgit:git-unpack-objects[1] instead
+(see `transfer.unpackLimit`).

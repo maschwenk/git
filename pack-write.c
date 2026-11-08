@@ -402,6 +402,7 @@ void fixup_pack_header_footer(const struct git_hash_algo *hash_algo,
 	char *buf;
 	ssize_t read_result;
 
+	hash_algo = unsafe_hash_algo(hash_algo);
 	git_hash_init(&old_hash_ctx, hash_algo);
 	git_hash_init(&new_hash_ctx, hash_algo);
 
