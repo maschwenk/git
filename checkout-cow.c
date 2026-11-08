@@ -369,6 +369,7 @@ int checkout_cow_entry(struct repository *repo,
 	char hex[GIT_MAX_HEXSZ + 1];
 	char shard[3];
 	size_t size;
+	unsigned long min_size = 64 * 1024;
 	int enabled = 0, source = -1, target = -1, dirfd = -1, shardfd = -1;
 	int ret = 0, populate = 0;
 	unsigned int mode = (ce->ce_mode & 0100) ? 0777 : 0666;
@@ -380,9 +381,13 @@ int checkout_cow_entry(struct repository *repo,
 	    (ca->crlf_action != CRLF_BINARY && ca->crlf_action != CRLF_TEXT_INPUT &&
 	     ca->crlf_action != CRLF_AUTO_INPUT) ||
 	    repo_config_get_bool(repo, "checkout.cowcache", &enabled) || !enabled ||
-	    !oideq(lookup_replace_object(repo, &ce->oid), &ce->oid) ||
-	    prepare_cache(repo, 1) || cache.unsupported ||
-	    odb_read_object_info(repo->objects, &ce->oid, &size) != OBJ_BLOB)
+	    (cache.repo == repo && cache.unsupported) ||
+	    !oideq(lookup_replace_object(repo, &ce->oid), &ce->oid))
+		return 0;
+	repo_config_get_ulong(repo, "checkout.cowcacheminsize", &min_size);
+	/* Check the size first so small files never touch the cache. */
+	if (odb_read_object_info(repo->objects, &ce->oid, &size) != OBJ_BLOB ||
+	    size < min_size || prepare_cache(repo, 1) || cache.unsupported)
 		return 0;
 
 	slash = find_last_dir_sep(path);
