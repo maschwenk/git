@@ -4,6 +4,7 @@
 #include "git-compat-util.h"
 #include "config.h"
 #include "entry.h"
+#include "checkout-cow.h"
 #include "gettext.h"
 #include "hash.h"
 #include "hex.h"
@@ -358,6 +359,11 @@ void write_pc_item(struct parallel_checkout_item *pc_item,
 		goto out;
 	}
 
+	if (checkout_cow_entry(the_repository, pc_item->ce, path.buf,
+			       &pc_item->ca, state, &pc_item->st)) {
+		pc_item->status = PC_ITEM_WRITTEN;
+		goto out;
+	}
 	fd = open(path.buf, O_WRONLY | O_CREAT | O_EXCL, mode);
 
 	if (fd < 0) {

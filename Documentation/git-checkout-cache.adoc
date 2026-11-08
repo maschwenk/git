@@ -1,0 +1,28 @@
+git-checkout-cache(1)
+=====================
+
+NAME
+----
+git-checkout-cache - Clear cached copy-on-write checkout contents
+
+SYNOPSIS
+--------
+[verse]
+'git checkout-cache' --clear
+
+DESCRIPTION
+-----------
+Remove the cached file contents used by `checkout.cowCache`. Existing
+working-tree files and Git objects are unaffected. This command takes the
+cache's writer lock and fails if another process is populating the cache.
+Readers can continue using already-open cache entries. The cache directories
+and lock file are retained so concurrent users keep using the same lock.
+
+The cache is experimental, disabled by default, and supported on macOS with
+APFS and Linux filesystems supporting reflinks. See `checkout.cowCache` in
+linkgit:git-config[1]. Do not manually remove the cache root or its lock file
+while Git processes are running.
+
+GIT
+---
+Part of the linkgit:git[1] suite

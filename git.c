@@ -548,6 +548,7 @@ static struct cmd_struct commands[] = {
 	{ "check-mailmap", cmd_check_mailmap, RUN_SETUP },
 	{ "check-ref-format", cmd_check_ref_format, NO_PARSEOPT  },
 	{ "checkout", cmd_checkout, RUN_SETUP | NEED_WORK_TREE },
+	{ "checkout-cache", cmd_checkout_cache, RUN_SETUP },
 	{ "checkout--worker", cmd_checkout__worker,
 		RUN_SETUP | NEED_WORK_TREE },
 	{ "checkout-index", cmd_checkout_index,

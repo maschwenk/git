@@ -14,6 +14,7 @@
 #include "progress.h"
 #include "fsmonitor.h"
 #include "entry.h"
+#include "checkout-cow.h"
 #include "parallel-checkout.h"
 
 static void create_directories(const char *path, int path_len,
@@ -299,6 +300,13 @@ static int write_entry(struct cache_entry *ce, char *path, struct conv_attrs *ca
 
 	clone_checkout_metadata(&meta, &state->meta, &ce->oid);
 
+	if (ce_mode_s_ifmt == S_IFREG) {
+		if (!to_tempfile && state->istate &&
+		    checkout_cow_entry(state->istate->repo, ce, path, ca, state, &st)) {
+			fstat_done = 1;
+			goto finish;
+		}
+	}
 	if (ce_mode_s_ifmt == S_IFREG) {
 		struct stream_filter *filter = get_stream_filter_ca(ca, &ce->oid);
 		if (filter &&
