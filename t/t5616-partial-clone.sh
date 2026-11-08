@@ -858,6 +858,69 @@ do
 	done
 done
 
+test_expect_success 'promisor fetch does not repack links without local non-promisor objects' '
+	test_when_finished "rm -rf skip-server skip-ref skip-client clone.trace fetch.trace" &&
+	git init skip-server &&
+	git -C skip-server config uploadpack.allowfilter 1 &&
+	git -C skip-server config uploadpack.allowanysha1inwant 1 &&
+	test_commit -C skip-server one &&
+	git clone --bare skip-server skip-ref &&
+	test_commit -C skip-server two &&
+	GIT_TRACE2_EVENT="$(pwd)/clone.trace" git clone --no-checkout \
+		--reference skip-ref --filter=blob:none \
+		"file://$(pwd)/skip-server" skip-client &&
+	test_config -C skip-client maintenance.auto false &&
+	git -C skip-server checkout -b side one &&
+	test_commit -C skip-server side &&
+	GIT_TRACE2_EVENT="$(pwd)/fetch.trace" git -C skip-client fetch origin &&
+
+	# "two" and "side" link to "one", which skip-client borrows from
+	# skip-ref, but skip-client has no objects outside of promisor packs.
+	test_subcommand_flex ! git pack-objects \
+		--exclude-promisor-objects-best-effort <clone.trace &&
+	test_trace2_data index-pack repack_local_links/skipped 2 <clone.trace &&
+	test_subcommand_flex ! git pack-objects \
+		--exclude-promisor-objects-best-effort <fetch.trace &&
+	test_trace2_data index-pack repack_local_links/skipped 2 <fetch.trace &&
+	ls skip-client/.git/objects/pack/*.pack >packs &&
+	test_line_count = 2 packs &&
+	ls skip-client/.git/objects/pack/*.promisor >promisors &&
+	test_line_count = 2 promisors
+'
+
+for storage in loose packed
+do
+	test_expect_success "promisor fetch repacks $storage local objects it links to" '
+		test_when_finished "rm -rf repack-server repack-client fetch.trace" &&
+		git init repack-server &&
+		git -C repack-server config uploadpack.allowfilter 1 &&
+		git -C repack-server config uploadpack.allowanysha1inwant 1 &&
+		test_commit -C repack-server one &&
+		git clone --filter=blob:none "file://$(pwd)/repack-server" repack-client &&
+		test_config -C repack-client maintenance.auto false &&
+		test_commit -C repack-client local &&
+		if test "$storage" = packed
+		then
+			git -C repack-client gc
+		fi &&
+		git -C repack-client push origin HEAD:refs/heads/topic &&
+		git -C repack-server checkout topic &&
+		test_commit -C repack-server two &&
+		GIT_TRACE2_EVENT="$(pwd)/fetch.trace" git -C repack-client fetch origin &&
+		test_subcommand_flex git pack-objects \
+			--exclude-promisor-objects-best-effort <fetch.trace &&
+
+		# Leave "local" reachable only through "two", from the promisor
+		# remote, and check that gc keeps it.
+		commit=$(git -C repack-client rev-parse local) &&
+		git -C repack-client tag -d local &&
+		git -C repack-client update-ref refs/heads/main origin/topic &&
+		git -C repack-client reflog expire --expire=now --all &&
+		git -C repack-client gc --prune=now &&
+		GIT_NO_LAZY_FETCH=1 git -C repack-client cat-file -e "$commit^{tree}"
+	'
+done
+
 
 . "$TEST_DIRECTORY"/lib-httpd.sh
 start_httpd
