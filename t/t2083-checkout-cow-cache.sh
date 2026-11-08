@@ -68,11 +68,11 @@ setup_text_repo () {
 }
 
 checkout_with_trace () {
-	local trace="$TRASH_DIRECTORY/$1" &&
+	local trace_file="$TRASH_DIRECTORY/$1" &&
 	shift &&
-	rm -f "$trace" &&
+	rm -f "$trace_file" &&
 	(
-		GIT_TRACE2_EVENT="$trace" &&
+		GIT_TRACE2_EVENT="$trace_file" &&
 		export GIT_TRACE2_EVENT &&
 		"$@"
 	)
