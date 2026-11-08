@@ -38,6 +38,7 @@ setup_repo () {
 		cd "$1" &&
 		git config core.autocrlf false &&
 		git config checkout.cowCache true &&
+		git config checkout.cowCacheMinSize 0 &&
 		git config checkout.workers 1 &&
 		git config checkout.thresholdForParallelism 0 &&
 		test-tool genrandom cow-file 8192 >file &&
@@ -56,6 +57,7 @@ setup_text_repo () {
 		cd "$1" &&
 		git config core.autocrlf false &&
 		git config checkout.cowCache true &&
+		git config checkout.cowCacheMinSize 0 &&
 		git config checkout.workers 1 &&
 		git config checkout.thresholdForParallelism 0 &&
 		printf 'one line\n$Id$\nsecond line\n' >file &&
@@ -67,12 +69,24 @@ setup_text_repo () {
 	)
 }
 
-checkout_with_trace () {
-	local trace="$TRASH_DIRECTORY/$1" &&
-	shift &&
-	rm -f "$trace" &&
+setup_sized_repo () {
+	setup_repo "$1" &&
 	(
-		GIT_TRACE2_EVENT="$trace" &&
+		cd "$1" &&
+		test-tool genrandom below $(($2 - 1)) >below &&
+		test-tool genrandom at $2 >at &&
+		test-tool genrandom above $(($2 + 1)) >above &&
+		git add below at above &&
+		git commit -m sized
+	)
+}
+
+checkout_with_trace () {
+	local trace_file="$TRASH_DIRECTORY/$1" &&
+	shift &&
+	rm -f "$trace_file" &&
+	(
+		GIT_TRACE2_EVENT="$trace_file" &&
 		export GIT_TRACE2_EVENT &&
 		"$@"
 	)
@@ -380,12 +394,17 @@ do
 		assert_no_clones replace-$workers.trace &&
 		test_cmp replacement "$repo/file" &&
 		test_cmp replacement "$repo/executable" &&
+		# Whether status rehashes depends on racy-git timing; force it.
+		test-tool chmtime -60 "$repo/file" "$repo/executable" &&
 		git -C "$repo" status --porcelain >enabled-status &&
 		rm "$repo/file" "$repo/executable" &&
 		git -C "$repo" -c checkout.cowCache=false \
 			checkout-index --index --force file executable &&
+		test-tool chmtime -60 "$repo/file" "$repo/executable" &&
 		git -C "$repo" status --porcelain >disabled-status &&
-		test_cmp enabled-status disabled-status
+		printf " M executable\n M file\n" >expect-status &&
+		test_cmp expect-status enabled-status &&
+		test_cmp expect-status disabled-status
 	'
 done
 
@@ -602,6 +621,99 @@ do
 		assert_fixture "$repo"
 	'
 done
+
+for workers in 1 2
+do
+	case $workers in
+	1) expected_workers=0 ;;
+	2) expected_workers=2 ;;
+	esac
+
+	for min_size in default 1g
+	do
+		test_expect_success "small files skip the cache with $min_size minimum size and $workers workers" '
+			repo=small-$min_size-$workers &&
+			setup_repo "$repo" &&
+			if test "$min_size" = default
+			then
+				git -C "$repo" config --unset checkout.cowCacheMinSize
+			else
+				git -C "$repo" config checkout.cowCacheMinSize $min_size
+			fi &&
+			rm "$repo/file" "$repo/other" "$repo/executable" &&
+			checkout_with_trace small-$min_size-$workers.trace \
+				test_checkout_workers $expected_workers \
+				git -C "$repo" -c checkout.workers=$workers \
+				checkout-index --index --all --force &&
+			assert_no_clones small-$min_size-$workers.trace &&
+			test_path_is_missing "$(cache_root "$repo")" &&
+			assert_fixture "$repo"
+		'
+	done
+
+	for min_size in 8k 1m
+	do
+		case $min_size in
+		8k) size=8192 ;;
+		1m) size=1048576 ;;
+		esac
+
+		test_expect_success COW_FS "checkout.cowCacheMinSize=$min_size boundary with $workers workers" '
+			repo=boundary-$min_size-$workers &&
+			trace_file=boundary-$min_size-$workers.trace &&
+			setup_sized_repo "$repo" $size &&
+			git -C "$repo" config checkout.cowCacheMinSize $min_size &&
+			below=$(git -C "$repo" rev-parse HEAD:below) &&
+			at=$(git -C "$repo" rev-parse HEAD:at) &&
+			above=$(git -C "$repo" rev-parse HEAD:above) &&
+			rm "$repo/below" "$repo/at" "$repo/above" &&
+			git -C "$repo" checkout-index --index --force below at above &&
+			test_path_is_missing "$(cache_path "$repo" "$below")" &&
+			test_cmp_bin "$repo/at" "$(cache_path "$repo" "$at")" &&
+			test_cmp_bin "$repo/above" "$(cache_path "$repo" "$above")" &&
+			rm "$repo/below" "$repo/at" "$repo/above" &&
+			checkout_with_trace "$trace_file" \
+				test_checkout_workers $expected_workers \
+				git -C "$repo" -c checkout.workers=$workers \
+				checkout-index --index --force below at above &&
+			! test_trace2_data checkout cow_cache/clone "$below" <"$trace_file" &&
+			assert_cloned "$trace_file" "$at" &&
+			assert_cloned "$trace_file" "$above" &&
+			test_path_is_missing "$(cache_path "$repo" "$below")" &&
+			verify_checkout "$repo"
+		'
+	done
+done
+
+test_expect_success COW_FS 'checkout.cowCacheMinSize=0 caches files of any size' '
+	setup_sized_repo min-size-zero 8192 &&
+	rm min-size-zero/below min-size-zero/at min-size-zero/above &&
+	checkout_with_trace min-size-zero.trace \
+		git -C min-size-zero checkout-index --index --force below at above &&
+	for path in below at above
+	do
+		oid=$(git -C min-size-zero rev-parse HEAD:$path) &&
+		assert_cloned min-size-zero.trace "$oid" &&
+		test_cmp_bin "min-size-zero/$path" "$(cache_path min-size-zero "$oid")" ||
+		return 1
+	done
+'
+
+test_expect_success COW_FS 'files below checkout.cowCacheMinSize ignore existing entries' '
+	setup_repo raised &&
+	oid=$(git -C raised rev-parse HEAD:file) &&
+	rm raised/file &&
+	checkout_with_trace raised-warm.trace \
+		git -C raised checkout-index --index --force file &&
+	assert_cloned raised-warm.trace "$oid" &&
+	git -C raised config checkout.cowCacheMinSize 8193 &&
+	rm raised/file &&
+	checkout_with_trace raised.trace \
+		git -C raised checkout-index --index --force file &&
+	assert_no_clones raised.trace &&
+	test_cmp_bin raised/file "$(cache_path raised "$oid")" &&
+	assert_fixture raised
+'
 
 test_expect_success COW_FS 'clearing shared cache preserves worktrees and allows repopulation' '
 	setup_repo clear &&

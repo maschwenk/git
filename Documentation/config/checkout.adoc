@@ -52,13 +52,13 @@ well the parallel version performs.
 	this operation. Unsupported filesystems and other cache failures fall
 	back to ordinary checkout.
 +
-This applies to regular files in sequential and parallel checkout, including
-`git worktree add`. Files needing checkout filters, encoding conversion,
-ident expansion or CRLF output use ordinary checkout. Replacement objects
-and temporary checkout files also bypass the cache. Cached contents are
-verified against the blob object ID after cloning and before publication.
-Working trees have distinct writable inodes; editing one cannot modify the
-cache or another worktree.
+This applies to regular files of at least `checkout.cowCacheMinSize` bytes in
+sequential and parallel checkout, including `git worktree add`. Files needing
+checkout filters, encoding conversion, ident expansion or CRLF output use
+ordinary checkout. Replacement objects and temporary checkout files also
+bypass the cache. Cached contents are verified against the blob object ID
+after cloning and before publication. Working trees have distinct writable
+inodes; editing one cannot modify the cache or another worktree.
 +
 The cache requires user-owned, private directories. Destination directories
 writable by other users, and macOS directories with extended ACLs, bypass
@@ -73,6 +73,15 @@ or build outputs. There is no automatic eviction. When either admission
 limit is reached, existing entries remain usable and misses use ordinary
 checkout. Use linkgit:git-checkout-cache[1] to clear entries safely. This is
 an expendable cache, not an object database or a backup.
+
+`checkout.cowCacheMinSize`::
+	Files smaller than this many bytes use ordinary checkout without
+	consulting the cache. Defaults to 64 KiB. Suffixes `k`, `m` and `g`
+	are supported. A value of 0 caches files of any size. Cloning a file
+	takes more filesystem operations than writing a small one, and a few
+	large files often hold much of a tree's data. Raising the limit does
+	not remove smaller entries already cached; they count toward the
+	admission limits until the cache is cleared.
 
 `checkout.cowCacheMaxBytes`::
 	Maximum total logical size of retained cache files admitted by a writer.
