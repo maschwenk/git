@@ -380,12 +380,17 @@ do
 		assert_no_clones replace-$workers.trace &&
 		test_cmp replacement "$repo/file" &&
 		test_cmp replacement "$repo/executable" &&
+		# Whether status rehashes depends on racy-git timing; force it.
+		test-tool chmtime -60 "$repo/file" "$repo/executable" &&
 		git -C "$repo" status --porcelain >enabled-status &&
 		rm "$repo/file" "$repo/executable" &&
 		git -C "$repo" -c checkout.cowCache=false \
 			checkout-index --index --force file executable &&
+		test-tool chmtime -60 "$repo/file" "$repo/executable" &&
 		git -C "$repo" status --porcelain >disabled-status &&
-		test_cmp enabled-status disabled-status
+		printf " M executable\n M file\n" >expect-status &&
+		test_cmp expect-status enabled-status &&
+		test_cmp expect-status disabled-status
 	'
 done
 
