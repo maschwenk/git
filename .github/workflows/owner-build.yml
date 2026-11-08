@@ -1,0 +1,31 @@
+name: owner-build
+
+on:
+  push:
+    branches: [owner]
+  pull_request:
+    branches: [owner]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: sudo apt-get update -q && sudo apt-get install -y -q cmake libcurl4-openssl-dev libexpat1-dev libssl-dev
+      - run: >
+          contrib/owner-build/build.sh "$RUNNER_TEMP/git" install test
+          T="t0013-sha1dc.sh t5300-pack-object.sh t5302-pack-index.sh t5510-fetch.sh t5601-clone.sh"
+      - run: '"$RUNNER_TEMP/git/bin/git" version --build-options'
+      - run: tar -C "$RUNNER_TEMP" -czf git-${{ matrix.runner }}.tar.gz git
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: git-${{ matrix.runner }}
+          path: git-${{ matrix.runner }}.tar.gz
