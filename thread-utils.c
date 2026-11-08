@@ -1,4 +1,5 @@
 #include "git-compat-util.h"
+#include "strbuf.h"
 #include "thread-utils.h"
 
 #if defined(hpux) || defined(__hpux) || defined(_hpux)
@@ -62,6 +63,62 @@ int online_cpus(void)
 #endif
 
 	return 1;
+#endif
+}
+
+int smt_active(void)
+{
+#ifdef __linux__
+	struct strbuf buf = STRBUF_INIT;
+	struct strbuf path = STRBUF_INIT;
+	DIR *dir;
+	struct dirent *de;
+	int seen = 0, incomplete = 0;
+	int ret = -1;
+
+	if (strbuf_read_file(&buf, "/sys/devices/system/cpu/smt/active", 0) >= 0) {
+		strbuf_trim(&buf);
+		if (!strcmp(buf.buf, "0") || !strcmp(buf.buf, "1"))
+			ret = buf.buf[0] - '0';
+		goto out;
+	}
+
+	/* Older kernels may omit smt/active. CPU 0 alone is not enough. */
+	dir = opendir("/sys/devices/system/cpu");
+	if (!dir)
+		goto out;
+	while ((de = readdir(dir))) {
+		const char *cpu;
+
+		if (!skip_prefix(de->d_name, "cpu", &cpu) || !*cpu ||
+		    strspn(cpu, "0123456789") != strlen(cpu))
+			continue;
+		strbuf_reset(&path);
+		strbuf_addf(&path, "/sys/devices/system/cpu/%s/topology/thread_siblings_list",
+			    de->d_name);
+		strbuf_reset(&buf);
+		if (strbuf_read_file(&buf, path.buf, 0) <= 0) {
+			incomplete = 1;
+			continue;
+		}
+		strbuf_trim(&buf);
+		if (strpbrk(buf.buf, ",-")) {
+			ret = 1;
+			break;
+		}
+		if (!buf.len || strspn(buf.buf, "0123456789") != buf.len)
+			incomplete = 1;
+		seen = 1;
+	}
+	closedir(dir);
+	if (ret != 1 && seen && !incomplete)
+		ret = 0;
+out:
+	strbuf_release(&path);
+	strbuf_release(&buf);
+	return ret;
+#else
+	return -1;
 #endif
 }
 

@@ -2075,13 +2075,15 @@ int cmd_index_pack(int argc,
 		/*
 		 * Experiments show that going above 20 threads doesn't help,
 		 * no matter how many cores you have. Below that, we tend to
-		 * max at half the number of online_cpus(), presumably because
-		 * half of those are hyperthreads rather than full cores. We'll
+		 * max at the number of cores. Unless we know that every CPU is
+		 * a core, assume that half of them are hyperthreads. We'll
 		 * never reduce the level below "3", though, to match a
 		 * historical value that nobody complained about.
 		 */
 		if (nr_threads < 4)
 			; /* too few cores to consider capping */
+		else if (!smt_active())
+			nr_threads = nr_threads < 20 ? nr_threads : 20;
 		else if (nr_threads < 6)
 			nr_threads = 3; /* historic cap */
 		else if (nr_threads < 40)
