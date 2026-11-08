@@ -563,6 +563,11 @@ include shared.mak
 # by the git project to migrate to using sha1collisiondetection as a
 # submodule.
 #
+# Unless DC_SHA1_EXTERNAL is defined, the built-in code is driven by the
+# faster implementation in sha1dc-accel/, which gives the same results
+# using the CPU's SHA-1 instructions and vector units where it has them.
+# Define DC_SHA1_NO_ACCEL to use the sha1collisiondetection code alone.
+#
 # === SHA-256 backend ===
 #
 # ==== Security ====
@@ -1555,6 +1560,7 @@ CLAR_TEST_SUITES += u-reftable-readwrite
 CLAR_TEST_SUITES += u-reftable-stack
 CLAR_TEST_SUITES += u-reftable-table
 CLAR_TEST_SUITES += u-reftable-tree
+CLAR_TEST_SUITES += u-sha1dc
 CLAR_TEST_SUITES += u-strbuf
 CLAR_TEST_SUITES += u-strcmp-offset
 CLAR_TEST_SUITES += u-string-list
@@ -2164,6 +2170,14 @@ ifdef DC_SHA1_SUBMODULE
 else
 	LIB_OBJS += sha1dc/sha1.o
 	LIB_OBJS += sha1dc/ubc_check.o
+endif
+ifdef DC_SHA1_NO_ACCEL
+	BASIC_CFLAGS += -DDC_SHA1_NO_ACCEL
+else
+	LIB_OBJS += sha1dc-accel/arm.o
+	LIB_OBJS += sha1dc-accel/sha1.o
+	LIB_OBJS += sha1dc-accel/ubc_check.o
+	LIB_OBJS += sha1dc-accel/x86.o
 endif
 	BASIC_CFLAGS += \
 		-DSHA1DC_NO_STANDARD_INCLUDES \
