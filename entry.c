@@ -518,6 +518,22 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 	strbuf_add(&path, state->base_dir, state->base_dir_len);
 	strbuf_add(&path, ce->name, ce_namelen(ce));
 
+	/*
+	 * In a worktree that started out empty, only an entry this checkout
+	 * wrote earlier can be in the way. Parallel checkout workers create
+	 * files with O_EXCL and hand such collisions back to be checked out
+	 * again below, so entries they will write need no lstat() here.
+	 */
+	if (state->empty_worktree && S_ISREG(ce->ce_mode)) {
+		create_directories(path.buf, path.len, state);
+		if (!ca) {
+			convert_attrs(state->istate, &ca_buf, ce->name);
+			ca = &ca_buf;
+		}
+		if (!enqueue_checkout(ce, ca, nr_checkouts))
+			return 0;
+	}
+
 	if (!check_path(path.buf, path.len, &st, state->base_dir_len)) {
 		const struct submodule *sub;
 		unsigned changed = ie_match_stat(state->istate, ce, &st,
