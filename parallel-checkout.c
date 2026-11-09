@@ -333,6 +333,30 @@ static int close_and_clear(int *fd)
 	return ret;
 }
 
+/*
+ * Create the missing directories in path[0..len), each one only inside a
+ * real directory. Return -1 if something else is in the way.
+ */
+static int create_leading_dirs(char *path, int len, int prefix_len)
+{
+	int i;
+
+	for (i = prefix_len + 1; i <= len; i++) {
+		int ok;
+
+		if (i < len && path[i] != '/')
+			continue;
+		path[i] = '\0';
+		ok = has_dirs_only_path(path, i, prefix_len) ||
+		     !mkdir(path, 0777) ||
+		     (errno == EEXIST && has_dirs_only_path(path, i, prefix_len));
+		path[i] = '/';
+		if (!ok)
+			return -1;
+	}
+	return 0;
+}
+
 void write_pc_item(struct parallel_checkout_item *pc_item,
 		   struct checkout *state)
 {
@@ -347,13 +371,17 @@ void write_pc_item(struct parallel_checkout_item *pc_item,
 	dir_sep = find_last_dir_sep(path.buf);
 
 	/*
-	 * The leading dirs should have been already created by now. But, in
-	 * case of path collisions, one of the dirs could have been replaced by
-	 * a symlink (checked out after we enqueued this entry for parallel
-	 * checkout). Thus, we must check the leading dirs again.
+	 * The leading dirs should have been already created by now, unless
+	 * the worktree started out empty, in which case we create them here.
+	 * But, in case of path collisions, one of the dirs could have been
+	 * replaced by a symlink (checked out after we enqueued this entry for
+	 * parallel checkout). Thus, we must check the leading dirs again.
 	 */
 	if (dir_sep && !has_dirs_only_path(path.buf, dir_sep - path.buf,
-					   state->base_dir_len)) {
+					   state->base_dir_len) &&
+	    (!state->empty_worktree ||
+	     create_leading_dirs(path.buf, dir_sep - path.buf,
+				 state->base_dir_len))) {
 		pc_item->status = PC_ITEM_COLLIDED;
 		trace2_data_string("pcheckout", NULL, "collision/dirname", path.buf);
 		goto out;
@@ -482,6 +510,8 @@ static struct pc_worker *setup_workers(struct checkout *state, int num_workers)
 		strvec_push(&cp->args, "checkout--worker");
 		if (state->base_dir_len)
 			strvec_pushf(&cp->args, "--prefix=%s", state->base_dir);
+		if (state->empty_worktree)
+			strvec_push(&cp->args, "--empty-worktree");
 		if (start_command(cp))
 			die("failed to spawn checkout worker");
 	}

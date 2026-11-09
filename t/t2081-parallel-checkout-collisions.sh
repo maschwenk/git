@@ -101,6 +101,17 @@ test_expect_success SYMLINKS,CASE_INSENSITIVE_FS 'do not follow symlinks collidi
 	test_path_is_missing e/x
 '
 
+# On clone the working tree starts out empty, so the workers create the
+# leading directories themselves and must not create them through "D".
+test_expect_success SYMLINKS,CASE_INSENSITIVE_FS 'do not follow symlinks colliding with leading dir on clone' '
+	git commit -m "symlink colliding with leading dir" &&
+	set_checkout_config 2 0 &&
+	test_checkout_workers 2 git clone . clone-symlink &&
+	test_path_is_dir clone-symlink/e &&
+	test_path_is_missing clone-symlink/e/x &&
+	test_path_is_file clone-symlink/d/x
+'
+
 # The two following tests check that parallel checkout correctly reports
 # colliding entries on clone. The sequential code detects a collision by
 # calling lstat() before trying to open(O_CREAT) a file. (Note that this only

@@ -521,11 +521,11 @@ int checkout_entry_ca(struct cache_entry *ce, struct conv_attrs *ca,
 	/*
 	 * In a worktree that started out empty, only an entry this checkout
 	 * wrote earlier can be in the way. Parallel checkout workers create
-	 * files with O_EXCL and hand such collisions back to be checked out
-	 * again below, so entries they will write need no lstat() here.
+	 * the leading directories and the file (with O_EXCL) themselves and
+	 * hand such collisions back to be checked out again below, so entries
+	 * they will write need no lstat() or mkdir() here.
 	 */
 	if (state->empty_worktree && S_ISREG(ce->ce_mode)) {
-		create_directories(path.buf, path.len, state);
 		if (!ca) {
 			convert_attrs(state->istate, &ca_buf, ce->name);
 			ca = &ca_buf;

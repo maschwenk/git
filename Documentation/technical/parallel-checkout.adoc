@@ -93,6 +93,12 @@ main process performs the following steps:
   attributes to later write the entry in parallel. If not, write the
   entry right away, using the default sequential code.
 
+If the working tree held nothing but `.git` when the checkout started,
+the main process first tries to enqueue each regular file without M1
+and M2: nothing can be in the way except entries this checkout wrote
+itself, and the workers detect those as collisions (see below). The
+workers then create the leading directories at W1.
+
 Note: we save the conversion attributes associated with each entry
 because the workers don't have access to the main process' index state,
 so they can't load the attributes by themselves (and the attributes are
@@ -114,7 +120,9 @@ Then, for each assigned item, each worker:
 * W1: Checks if there is any non-directory file in the leading part of
   the entry's path or if there already exists a file at the entry' path.
   If so, mark the entry with `PC_ITEM_COLLIDED` and skip it (more on
-  this later).
+  this later). In a working tree that started out empty, missing
+  leading directories are created here, each only inside a real
+  directory.
 
 * W2: Creates the file (with O_CREAT and O_EXCL).
 
