@@ -163,4 +163,22 @@ test_expect_success 'corrupted loose commit can be read from alternate' '
 	test_grep "inflate: data stream error" err
 '
 
+test_expect_success 'checkout uses a packed blob over a misnamed loose copy' '
+	git init packed-and-misnamed &&
+	(
+		cd packed-and-misnamed &&
+		test_commit content &&
+		git repack -a -d &&
+		good=$(obj_to_file HEAD:content.t) &&
+		blob=$(echo corrupt | git hash-object -w --stdin) &&
+		bad=$(obj_to_file $blob) &&
+		mkdir -p "${good%/*}" &&
+		mv "$bad" "$good" &&
+		rm content.t &&
+		git checkout -- content.t &&
+		echo content >expect &&
+		test_cmp expect content.t
+	)
+'
+
 test_done
