@@ -921,6 +921,99 @@ do
 	'
 done
 
+# Print the missing objects reachable from $2 in repository $1.
+missing_for_checkout () {
+	git -C "$1" rev-list --objects --missing=print "$2" >objects &&
+	sed -n "s/^?//p" objects
+}
+
+test_expect_success 'setup for fetch.blobsForCheckout' '
+	git init bfc-server &&
+	git -C bfc-server config uploadpack.allowfilter 1 &&
+	git -C bfc-server config uploadpack.allowanysha1inwant 1 &&
+	test_commit -C bfc-server one &&
+	git clone --no-checkout --filter=blob:none \
+		"file://$(pwd)/bfc-server" bfc-client
+'
+
+test_expect_success 'fetch.blobsForCheckout is off by default' '
+	test_commit -C bfc-server two &&
+	git -C bfc-client fetch origin main &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_line_count = 2 missing
+'
+
+test_expect_success 'fetch.blobsForCheckout fetches the blobs checkout needs' '
+	test_when_finished "rm -f checkout.trace" &&
+	test_commit -C bfc-server three &&
+	git -C bfc-client -c fetch.blobsForCheckout=true fetch origin main &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_must_be_empty missing &&
+	GIT_TRACE2_EVENT="$(pwd)/checkout.trace" \
+		git -C bfc-client checkout FETCH_HEAD &&
+	test_grep ! "\"key\":\"fetch_count\"" checkout.trace
+'
+
+test_expect_success 'fetch.blobsForCheckout reuses the connection when the commits are local' '
+	test_when_finished "rm -f fetch.trace packet.trace" &&
+	git -C bfc-server checkout -b side &&
+	test_commit -C bfc-server four &&
+	git -C bfc-client fetch origin side &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_line_count = 1 missing &&
+	GIT_TRACE2_EVENT="$(pwd)/fetch.trace" GIT_TRACE_PACKET="$(pwd)/packet.trace" \
+		git -C bfc-client -c protocol.version=2 \
+		-c fetch.blobsForCheckout=true fetch origin side &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_must_be_empty missing &&
+	grep "\"child_class\":\"transport/file\"" fetch.trace >connections &&
+	test_line_count = 1 connections &&
+	grep "fetch> command=fetch" packet.trace >requests &&
+	test_line_count = 1 requests
+'
+
+test_expect_success 'fetch.blobsForCheckout fetches nothing above its limit' '
+	test_when_finished "rm -f fetch.trace" &&
+	test_commit -C bfc-server five &&
+	test_commit -C bfc-server six &&
+	GIT_TRACE2_EVENT="$(pwd)/fetch.trace" \
+		git -C bfc-client -c fetch.blobsForCheckout=1 fetch origin side &&
+	test_grep "\"key\":\"blobs_for_checkout/missing\",\"value\":\"-1\"" fetch.trace &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_line_count = 2 missing &&
+
+	# The lazy fetch from checkout inherits the setting.
+	git -C bfc-client -c fetch.blobsForCheckout=1 checkout FETCH_HEAD &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_must_be_empty missing
+'
+
+test_expect_success 'fetch.blobsForCheckout does nothing outside a partial clone' '
+	test_when_finished "rm -f fetch.trace" &&
+	git clone --no-checkout "file://$(pwd)/bfc-server" bfc-full &&
+	test_commit -C bfc-server seven &&
+	GIT_TRACE2_EVENT="$(pwd)/fetch.trace" \
+		git -C bfc-full -c fetch.blobsForCheckout=true fetch origin side &&
+	test_grep ! "blobs_for_checkout" fetch.trace
+'
+
+test_expect_success 'fetch.blobsForCheckout skips the tags that --tags adds' '
+	test_when_finished "rm -f fetch.trace" &&
+	git -C bfc-server checkout -b other &&
+	test_commit -C bfc-server eight &&
+	git -C bfc-server checkout side &&
+	test_commit -C bfc-server nine &&
+	GIT_TRACE2_EVENT="$(pwd)/fetch.trace" \
+		git -C bfc-client -c fetch.blobsForCheckout=true \
+		fetch --tags origin side &&
+	test_grep "\"key\":\"blobs_for_checkout/missing\",\"value\":\"2\"" fetch.trace &&
+	missing_for_checkout bfc-client FETCH_HEAD >missing &&
+	test_must_be_empty missing &&
+	git -C bfc-server rev-parse eight:eight.t >expect &&
+	missing_for_checkout bfc-client eight >missing &&
+	test_cmp expect missing
+'
+
 
 . "$TEST_DIRECTORY"/lib-httpd.sh
 start_httpd

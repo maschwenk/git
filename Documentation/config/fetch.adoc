@@ -94,6 +94,21 @@ A value of 0 will give some reasonable default. If unset, it defaults to 1.
 For submodules, this setting can be overridden using the `submodule.fetchJobs`
 config setting.
 
+`fetch.blobsForCheckout`::
+	In a partial clone, when fetching refs named on the command line
+	from a promisor remote, also fetch the blobs that checking out the
+	fetched commits needs and that are missing locally, so that a
+	checkout right after does not have to fetch them from the remote
+	itself. If there is nothing else to download, the blobs come over
+	the connection that listed the refs, except through remote helpers
+	such as HTTP. Sparse-checkout patterns are not taken into account,
+	and fetches that use `--depth`, `--deepen`, `--shallow-since`,
+	`--shallow-exclude` or `--unshallow` ignore this setting. A number
+	sets the most blobs to fetch this way; if more are missing, none
+	are fetched. `true` means 1000. If the transfer of the blobs fails,
+	the fetch fails, after the refs have been updated. Defaults to
+	`false`.
+
 `fetch.writeCommitGraph`::
 	Set to true to write a commit-graph after every `git fetch` command
 	that downloads a pack-file from a remote. Using the `--split` option,
