@@ -477,6 +477,13 @@ static int odb_source_files_read_object_stream(struct odb_stream **out,
 	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next)
 		if (!odb_source_read_object_stream(out, &dir->packed->base, oid))
 			return 0;
+	/*
+	 * A packed object that did not get a stream is small or a delta, and
+	 * the caller reads it in core. Do not look for loose copies first.
+	 */
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next)
+		if (!odb_source_read_object_info(&dir->packed->base, oid, NULL, 0, NULL))
+			return -1;
 	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next)
 		if (!odb_source_read_object_stream(out, &dir->loose->base, oid))
 			return 0;
