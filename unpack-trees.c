@@ -422,6 +422,20 @@ static int must_checkout(const struct cache_entry *ce,
 	return ce->ce_flags & CE_UPDATE;
 }
 
+static int worktree_is_empty(void)
+{
+	DIR *dir = opendir(".");
+	struct dirent *de;
+	int empty = 1;
+
+	if (!dir)
+		return 0;
+	while (empty && (de = readdir_skip_dot_and_dotdot(dir)))
+		empty = !strcmp(de->d_name, ".git");
+	closedir(dir);
+	return empty;
+}
+
 static int check_updates(struct unpack_trees_options *o,
 			 struct index_state *index)
 {
@@ -483,8 +497,10 @@ static int check_updates(struct unpack_trees_options *o,
 	get_parallel_checkout_configs(&pc_workers, &pc_threshold);
 
 	enable_delayed_checkout(&state);
-	if (pc_workers > 1)
+	if (pc_workers > 1) {
 		init_parallel_checkout();
+		state.empty_worktree = worktree_is_empty();
+	}
 	for (i = 0; i < index->cache_nr; i++) {
 		struct cache_entry *ce = index->cache[i];
 

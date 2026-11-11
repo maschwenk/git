@@ -123,9 +123,12 @@ int cmd_checkout__worker(int argc,
 			 struct repository *repo UNUSED)
 {
 	struct checkout state = CHECKOUT_INIT;
+	int empty_worktree = 0;
 	struct option checkout_worker_options[] = {
 		OPT_STRING(0, "prefix", &state.base_dir, N_("string"),
 			N_("when creating files, prepend <string>")),
+		OPT_BOOL(0, "empty-worktree", &empty_worktree,
+			 N_("create missing leading directories")),
 		OPT_END()
 	};
 
@@ -141,6 +144,7 @@ int cmd_checkout__worker(int argc,
 
 	if (state.base_dir)
 		state.base_dir_len = strlen(state.base_dir);
+	state.empty_worktree = empty_worktree;
 
 	/*
 	 * Setting this on a worker won't actually update the index. We just

@@ -17,7 +17,9 @@ struct checkout {
 		 quiet:1,
 		 not_new:1,
 		 clone:1,
-		 refresh_cache:1;
+		 refresh_cache:1,
+		 /* The worktree held nothing but .git when the checkout started. */
+		 empty_worktree:1;
 };
 #define CHECKOUT_INIT { .base_dir = "" }
 
