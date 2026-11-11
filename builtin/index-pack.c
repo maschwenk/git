@@ -1844,6 +1844,7 @@ static void repack_local_links(void)
 			strvec_push(&cmd.args, "pack-objects");
 			strvec_push(&cmd.args,
 				    "--exclude-promisor-objects-best-effort");
+			strvec_push(&cmd.args, "--local");
 			strvec_push(&cmd.args, base_name);
 			cmd.git_cmd = 1;
 			cmd.in = -1;
