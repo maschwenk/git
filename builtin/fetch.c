@@ -16,6 +16,7 @@
 #include "object-name.h"
 #include "odb.h"
 #include "odb/source.h"
+#include "packfile.h"
 #include "oidset.h"
 #include "oid-array.h"
 #include "commit.h"
@@ -33,6 +34,7 @@
 #include "pager.h"
 #include "path.h"
 #include "pkt-line.h"
+#include "tree-walk.h"
 #include "list-objects-filter-options.h"
 #include "commit-reach.h"
 #include "branch.h"
@@ -113,12 +115,25 @@ struct fetch_config {
 	int recurse_submodules;
 	int parallel;
 	int submodule_fetch_jobs;
+	int blobs_for_checkout;
 };
 
 static int git_fetch_config(const char *k, const char *v,
 			    const struct config_context *ctx, void *cb)
 {
 	struct fetch_config *fetch_config = cb;
+
+	if (!strcmp(k, "fetch.blobsforcheckout")) {
+		int is_bool;
+
+		fetch_config->blobs_for_checkout =
+			git_config_bool_or_int(k, v, ctx->kvi, &is_bool);
+		if (is_bool && fetch_config->blobs_for_checkout)
+			fetch_config->blobs_for_checkout = 1000;
+		if (fetch_config->blobs_for_checkout < 0)
+			die(_("fetch.blobsForCheckout cannot be negative"));
+		return 0;
+	}
 
 	if (!strcmp(k, "fetch.all")) {
 		fetch_config->all = git_config_bool(k, v);
@@ -1718,6 +1733,130 @@ static int backfill_tags(struct display_state *display_state,
 	return retcode;
 }
 
+static int in_promisor_pack(const struct object_id *oid)
+{
+	struct odb_source_info source;
+	struct object_info oi = { .source_infop = &source };
+
+	return !odb_read_object_info_extended(the_repository->objects, oid, &oi,
+					      OBJECT_INFO_FOR_PREFETCH) &&
+	       source.source->type == ODB_SOURCE_PACKED &&
+	       source.u.packed.pack->pack_promisor;
+}
+
+/*
+ * Add the blobs below tree_oid that are missing locally to "missing",
+ * or return -1 once there are more than "max". Trees outside promisor
+ * packs, such as those borrowed from a --reference repository, are
+ * assumed to have all their blobs and are not walked.
+ */
+static int collect_missing_blobs(const struct object_id *tree_oid,
+				 struct oidset *seen, struct oid_array *missing,
+				 int max)
+{
+	struct tree_desc desc;
+	struct name_entry entry;
+	enum object_type type;
+	size_t size;
+	void *buf;
+	int ret = 0;
+
+	if (oidset_insert(seen, tree_oid) || !in_promisor_pack(tree_oid))
+		return 0;
+	buf = odb_read_object(the_repository->objects, tree_oid, &type, &size);
+	if (!buf || type != OBJ_TREE) {
+		free(buf);
+		return 0;
+	}
+	init_tree_desc(&desc, tree_oid, buf, size);
+	while (!ret && tree_entry(&desc, &entry)) {
+		if (S_ISGITLINK(entry.mode))
+			continue;
+		if (S_ISDIR(entry.mode))
+			ret = collect_missing_blobs(&entry.oid, seen, missing, max);
+		else if (!oidset_insert(seen, &entry.oid) &&
+			 !odb_has_object(the_repository->objects, &entry.oid, 0)) {
+			if (missing->nr >= max)
+				ret = -1;
+			else
+				oid_array_append(missing, &entry.oid);
+		}
+	}
+	free(buf);
+	return ret;
+}
+
+/*
+ * In a partial clone, fetch the blobs that checking out the fetched
+ * commits needs, reusing the transport when possible, so that checkout
+ * does not have to go back to the remote for them. This runs after the
+ * refs are updated. An error the transport returns leaves the blobs to
+ * checkout, but fetch-pack still dies on protocol and transfer errors,
+ * as it would if checkout fetched the blobs lazily.
+ */
+static void fetch_blobs_for_checkout(struct transport *transport,
+				     struct ref *ref_map, int max,
+				     struct list_objects_filter_options *filter_options)
+{
+	struct oidset seen = OIDSET_INIT;
+	struct oid_array missing = OID_ARRAY_INIT;
+	struct ref *blobs = NULL, **tail = &blobs;
+	int too_many = 0;
+
+	if (deepen || !repo_promisor_remote_find(the_repository, transport->remote->name))
+		return;
+
+	trace2_region_enter("fetch", "blobs_for_checkout", the_repository);
+	for (struct ref *rm = ref_map; rm && !too_many; rm = rm->next) {
+		enum object_type type;
+		struct object_info oi = { .typep = &type };
+		struct commit *commit;
+
+		/* Only refs named on the command line, not tags from --tags. */
+		if (rm->fetch_head_status != FETCH_HEAD_MERGE)
+			continue;
+		/* Lazy fetches inherit this setting; do not parse their blobs. */
+		if (odb_read_object_info_extended(the_repository->objects, &rm->old_oid,
+						  &oi, OBJECT_INFO_FOR_PREFETCH) ||
+		    (type != OBJ_COMMIT && type != OBJ_TAG))
+			continue;
+		commit = lookup_commit_reference_gently(the_repository, &rm->old_oid, 1);
+		if (commit)
+			too_many = collect_missing_blobs(get_commit_tree_oid(commit),
+							 &seen, &missing, max);
+	}
+	if (too_many || !missing.nr)
+		goto out;
+
+	for (size_t i = 0; i < missing.nr; i++) {
+		*tail = alloc_ref(oid_to_hex(&missing.oid[i]));
+		oidcpy(&(*tail)->old_oid, &missing.oid[i]);
+		(*tail)->exact_oid = 1;
+		tail = &(*tail)->next;
+	}
+	if (transport->cannot_reuse) {
+		gsecondary = prepare_transport(transport->remote, 0, filter_options);
+		transport = gsecondary;
+	}
+	transport_set_option(transport, TRANS_OPT_FOLLOWTAGS, NULL);
+	transport_set_option(transport, TRANS_OPT_REFETCH, "yes");
+	if (transport_fetch_refs(transport, blobs))
+		warning(_("could not fetch the blobs for checkout"));
+	transport_unlock_pack(transport, 0);
+	if (gsecondary) {
+		transport_disconnect(gsecondary);
+		gsecondary = NULL;
+	}
+
+out:
+	trace2_region_leave("fetch", "blobs_for_checkout", the_repository);
+	trace2_data_intmax("fetch", the_repository, "blobs_for_checkout/missing",
+			   too_many ? -1 : (intmax_t)missing.nr);
+	free_refs(blobs);
+	oid_array_clear(&missing);
+	oidset_clear(&seen);
+}
+
 static const char *strip_refshead(const char *name){
 	skip_prefix(name, "refs/heads/", &name);
 	return name;
@@ -2135,6 +2274,10 @@ static int do_fetch(struct transport *transport,
 		goto cleanup;
 
 	commit_fetch_head(&fetch_head);
+
+	if (config->blobs_for_checkout && rs->nr)
+		fetch_blobs_for_checkout(transport, ref_map,
+					 config->blobs_for_checkout, filter_options);
 
 	collect_updated_tips(updated_tips, ref_map);
 
