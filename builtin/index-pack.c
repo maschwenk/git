@@ -26,6 +26,7 @@
 #include "oidset.h"
 #include "path.h"
 #include "replace-object.h"
+#include "trace2.h"
 #include "tree-walk.h"
 #include "promisor-remote.h"
 #include "run-command.h"
@@ -1811,6 +1812,36 @@ static void show_pack_info(int stat_only)
 	free(chain_histogram);
 }
 
+static int bail_on_loose(const struct object_id *oid UNUSED,
+			 const char *path UNUSED,
+			 void *data UNUSED)
+{
+	return 1;
+}
+
+static bool all_local_objects_in_promisor_packs(void)
+{
+	struct odb_source_files *files;
+	struct packfile_list_entry *e;
+
+	/*
+	 * Look for loose objects before rereading the pack directory: if a
+	 * concurrent repack packs loose objects and then deletes them, we
+	 * see them in one place or the other.
+	 */
+	if (for_each_loose_file_in_source(the_repository->objects->source,
+					  bail_on_loose, NULL, NULL, NULL))
+		return false;
+
+	odb_reprepare(the_repository->objects);
+	files = odb_source_files_downcast(the_repository->objects->source);
+	for (e = packfile_store_get_packs(files->dirs->packed); e; e = e->next)
+		if (!e->pack->pack_promisor)
+			return false;
+
+	return true;
+}
+
 static void repack_local_links(void)
 {
 	struct child_process cmd = CHILD_PROCESS_INIT;
@@ -1822,6 +1853,20 @@ static void repack_local_links(void)
 
 	if (!oidset_size(&outgoing_links))
 		return;
+
+	/*
+	 * gc keeps every object in a promisor pack and never removes objects
+	 * from an alternate, so if all of our own objects are in promisor
+	 * packs, there is nothing to protect. Skip the repack, whose walk
+	 * from the links can cover all of the history borrowed from an
+	 * alternate.
+	 */
+	if (all_local_objects_in_promisor_packs()) {
+		trace2_data_intmax("index-pack", the_repository,
+				   "repack_local_links/skipped",
+				   oidset_size(&outgoing_links));
+		return;
+	}
 
 	oidset_iter_init(&outgoing_links, &iter);
 	while ((oid = oidset_iter_next(&iter))) {
