@@ -323,7 +323,7 @@ static void retire_stale_watches(struct fsm_listen_data *data)
 }
 
 /*
- * Check for stale directory renames.
+ * Give up on stale directory renames.
  *
  * https://man7.org/linux/man-pages/man7/inotify.7.html
  *
@@ -331,20 +331,24 @@ static void retire_stale_watches(struct fsm_listen_data *data)
  * IN_MOVED_FROM+IN_MOVED_TO event pair is not atomic, and the possibility that
  * there may not be any IN_MOVED_TO event.
  *
- * If the IN_MOVED_TO event is not received within the timeout then events have
- * been missed and the monitor is in an inconsistent state with respect to the
- * filesystem.
+ * Treat an expired rename as a move out of the watched tree, although the
+ * IN_MOVED_TO may only be late, and remove the watches of the whole
+ * subtree. The IN_MOVED_FROM has already reported the old path, and a
+ * later IN_MOVED_TO watches and walks the destination again.
  */
-static int check_stale_dir_renames(struct hashmap *renames, time_t max_age)
+static void expire_dir_renames(struct fsm_listen_data *data, time_t max_age)
 {
 	struct rename_entry *re;
 	struct hashmap_iter iter;
 
-	hashmap_for_each_entry(renames, &iter, re, ent) {
-		if (re->whence <= max_age)
-			return -1;
-	}
-	return 0;
+	hashmap_for_each_entry(&data->renames, &iter, re, ent)
+		if (re->whence <= max_age) {
+			trace_printf_key(&trace_fsmonitor,
+					 "no IN_MOVED_TO for '%s', retiring subtree watches",
+					 re->dir);
+			mark_stale_directory(re->dir, data);
+		}
+	retire_stale_watches(data);
 }
 
 /*
@@ -843,9 +847,8 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 	int poll_num;
 	/*
 	 * Interval in seconds between checks for stale directory renames.
-	 * A directory rename that is not completed within this window
-	 * (i.e. no matching IN_MOVED_TO for an IN_MOVED_FROM) indicates
-	 * missed events, forcing a shutdown.
+	 * A directory rename not completed within this window is treated
+	 * as a move out of the watched tree.
 	 */
 	const int interval = 1;
 	time_t checked = time(NULL);
@@ -874,13 +877,8 @@ void fsm_listen__loop(struct fsmonitor_daemon_state *state)
 
 			if ((time(NULL) - checked) >= interval) {
 				checked = time(NULL);
-				if (check_stale_dir_renames(&state->listen_data->renames,
-							    checked - interval)) {
-					trace_printf_key(&trace_fsmonitor,
-							 "missed IN_MOVED_TO events, forcing shutdown");
-					state->listen_data->shutdown = SHUTDOWN_FORCE;
-					continue;
-				}
+				expire_dir_renames(state->listen_data,
+						   checked - interval);
 			}
 
 			if (poll_num > 0 && (fds[0].revents & POLLIN))
