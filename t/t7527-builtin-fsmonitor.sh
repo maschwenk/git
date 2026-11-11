@@ -594,6 +594,27 @@ test_expect_success 'rapid nested directory creation' '
 	git fsmonitor--daemon status
 '
 
+test_expect_success 'status sees changes in a directory moved into the worktree' '
+	test_when_finished "stop_daemon_delete_repo test_move_in" &&
+
+	git init test_move_in &&
+	git -C test_move_in config core.fsmonitor true &&
+	start_daemon -C test_move_in &&
+
+	mkdir outside &&
+	echo 1 >outside/file &&
+	mv outside test_move_in/moved-in &&
+	git -C test_move_in add moved-in &&
+	git -C test_move_in status --porcelain >actual &&
+	echo "A  moved-in/file" >expect &&
+	test_cmp expect actual &&
+
+	echo 22 >test_move_in/moved-in/file &&
+	git -C test_move_in status --porcelain >actual &&
+	echo "AM moved-in/file" >expect &&
+	test_cmp expect actual
+'
+
 # The next few test cases exercise the token-resync code.  When filesystem
 # drops events (because of filesystem velocity or because the daemon isn't
 # polling fast enough), we need to discard the cached data (relative to the

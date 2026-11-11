@@ -557,7 +557,9 @@ static int process_event(const char *path,
 		/* received IN_MOVE_TO, update watch to reflect new path */
 		if (em_rename_dir_to(event->mask)) {
 			rename_dir(event->cookie, path, state->listen_data);
-			if (register_inotify(path, state, *batch)) {
+			/* in case there was no IN_MOVED_FROM to match */
+			if (add_watch(path, state->listen_data) ||
+			    register_inotify(path, state, *batch)) {
 				state->listen_data->shutdown = SHUTDOWN_ERROR;
 				goto done;
 			}
